@@ -31,6 +31,11 @@ _LINE = re.compile(
 )
 # An empty room renders "range None..0".
 _NONCE = re.compile(r"^\d{1,19}$")
+# The service applies one rule to <room>, <nick>, <ns> and <key>; only <text>
+# and <value> are free-form. Checking it here is not just a round trip saved:
+# a refused write still spends a room-creation token, so three typos can lock
+# an IP out of creating rooms for eight hours without a room existing.
+_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 _HEADER = re.compile(r"^#\s*room\s+(?P<room>\S+)\s+messages\s+(?P<count>\d{1,19})\s+"
                      r"range\s+(?P<lo>\d{1,19}|None)\.\.(?P<hi>\d{1,19}|None)\s*$")
 
@@ -138,6 +143,7 @@ class Client:
         Retention is 7 days and the window is a ring buffer, so treat anything
         you need later as ephemeral and keep your own copy.
         """
+        _check_name(room, "room")
         query = {}
         if since is not None:
             query["since"] = _as_index(since, "since")
@@ -197,6 +203,8 @@ class Client:
 
     def say(self, room, nick, text):
         """Post an *unsigned* message. Anyone can post under any nick."""
+        _check_name(room, "room")
+        _check_name(nick, "nick")
         text = sweep(text)
         _check_len(text, MAX_MESSAGE_CHARS, "message")
         return self.transport.get(self._url("r", room, "say", nick, text),
@@ -210,6 +218,7 @@ class Client:
         moment the full tuple is available. Persist it if the post is meant to
         be cited as evidence of authorship.
         """
+        _check_name(room, "room")
         # The service sweeps and trims before storing, applies its length cap to
         # the result, and verifies the signature against that. Sign and record
         # the same string, or the record will not match what the room holds.
@@ -254,6 +263,8 @@ class Client:
     # -- notes (KV) ------------------------------------------------------
 
     def get_note(self, namespace, key):
+        _check_name(namespace, "namespace")
+        _check_name(key, "key")
         return self.transport.get(self._url("kv", namespace, key))
 
     def set_note(self, namespace, key, value):
@@ -264,6 +275,8 @@ class Client:
         not a bad request: retrying the same key will never succeed until an
         idle note is reclaimed (7 days).
         """
+        _check_name(namespace, "namespace")
+        _check_name(key, "key")
         _check_len(value, MAX_NOTE_CHARS, "note")
         return self.transport.get(self._url("kv", namespace, key, "set", value),
                                   idempotent=False)
@@ -338,6 +351,19 @@ def parse_room(body):
 
 def _opt_int(value):
     return None if value in (None, "None") else int(value)
+
+
+def _check_name(value, label):
+    """Validate a room, nick, namespace or key before it costs anything."""
+    if not isinstance(value, str) or not _NAME.fullmatch(value):
+        raise TechnocoreError(
+            "%s must match /^[a-z0-9][a-z0-9_-]{0,47}$/ -- lowercase letters, "
+            "digits, - and _, 1-48 characters, starting with a letter or digit. "
+            "Got %r. Usual causes: uppercase (lowercase it), a space (use - "
+            "instead), a dot or slash, or over 48 characters. Refused here "
+            "because a rejected write still spends a room-creation token."
+            % (label, value if isinstance(value, str) else type(value).__name__))
+    return value
 
 
 def _as_index(value, label):

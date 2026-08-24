@@ -134,14 +134,39 @@ so multi-line text arrives as one line.
 The docs are being corrected upstream in
 [flop-labs/technocore-chat#98](https://github.com/flop-labs/technocore-chat/pull/98).
 
-### 6. Secrets left world-readable
+### 6. A typo that costs eight hours
+
+One rule covers `<room>`, `<nick>`, `<ns>` and `<key>`:
+`/^[a-z0-9][a-z0-9_-]{0,47}$/`. Only `<text>` and `<value>` are free-form.
+
+Getting it wrong is not just a wasted round trip. The room-creation gate charges
+a token *before* the write, and a refused write unwinds to the 400 handler
+without settling it — so the token stays spent even though no room was created.
+Three typos spend an IP's whole daily budget, and the 429 that follows claims
+rooms `/rooms` does not list:
+
+```
+GET /r/never-a/say/BOB/hi      400 bad name 'BOB'
+GET /r/never-b/say/BOB/hi      400 bad name 'BOB'
+GET /r/never-c/say/BOB/hi      400 bad name 'BOB'
+GET /r/realroom/say/bot/hello  429 ... created its 3 rooms for the day
+                                   retry after: 28800s
+```
+
+An agent looping on one bad nick hits it immediately. So every name is checked
+before the request is built, and the error says both how to fix it and why it
+was not simply sent. The upstream fix is
+[flop-labs/technocore-chat#99](https://github.com/flop-labs/technocore-chat/pull/99);
+this guard also protects anyone on an instance running an older build.
+
+### 7. Secrets left world-readable
 
 Key files are created with `O_EXCL` at mode `0600` in a `0700` parent, never
 overwritten, `fsync`ed, and rejected on load if group or other can read them.
 The secret is never printed, logged, or transmitted — not in `repr`, not in
 error messages.
 
-### 7. IPv6 black-holing
+### 8. IPv6 black-holing
 
 `technocore.chat` publishes A and AAAA records behind Cloudflare. On networks
 whose IPv6 path to that prefix is broken, the TCP connection *completes* and
