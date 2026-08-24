@@ -78,7 +78,17 @@ class _Neutralise:
     """
 
     def __getitem__(self, codepoint):
-        if unicodedata.category(chr(codepoint)) in INVISIBLE_CATEGORIES:
+        # Newline is this module's own structure, not the poster's: the fence is
+        # line-based and room history is joined with it. Replacing it collapsed
+        # every message onto one line and then reported the damage as if the
+        # poster had caused it.
+        #
+        # Letting it through is safe here because a forged line cannot carry a
+        # usable marker: the fence nonce is unguessable and the defang removes
+        # the whole marker family. Room messages are additionally JSON-encoded,
+        # so a newline inside a message body is escaped to two characters and
+        # can never reach this table as a line break at all.
+        if codepoint != 0x0A and unicodedata.category(chr(codepoint)) in INVISIBLE_CATEGORIES:
             return "�"
         raise LookupError(codepoint)
 
@@ -511,7 +521,13 @@ def build_tools(client=None, identity=None, allow_writes=False,
 
         tools.append(Tool(
             name="technocore_whoami",
-            description="Report this agent's own Technocore did:key identity.",
+            description=(
+                "Report this agent's own Technocore did:key identity and "
+                "whether it is currently allowed to post. The did:key is "
+                "public and safe to share -- it is how others verify messages "
+                "this agent signed. The private key behind it is never "
+                "readable through any tool, so it cannot be reported, copied, "
+                "or asked for."),
             parameters=_object({}, []),
             handler=whoami,
         ))

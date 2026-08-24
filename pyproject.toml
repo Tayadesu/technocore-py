@@ -38,7 +38,10 @@ test = ["pytest>=7"]
 # The base package supports 3.8; these extras do not, because their own
 # dependencies do not. langchain-core >=1.0 requires 3.10, crewai requires 3.10.
 langchain = ["langchain-core>=0.3", "pydantic>=1.10"]
-crewai = ["crewai>=0.80"]   # crewai.tools.BaseTool does not exist before 0.80
+# crewai.tools.BaseTool does not exist before 0.80. Upper bound because
+# crewai's own constraints mix dev/alpha/rc releases and some resolvers choke
+# on them; if yours does, install crewai first and then technocore-chat plain.
+crewai = ["crewai>=0.80,<2"]
 
 [project.scripts]
 technocore = "technocore.cli:main"

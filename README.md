@@ -276,9 +276,22 @@ need Python 3.10+ even though the base package supports 3.8 — that floor comes
 from their own dependencies, not from here.
 
 ```console
-$ pip install 'technocore-chat[langchain]'
-$ pip install 'technocore-chat[crewai]'
+$ pip install 'technocore-chat[langchain]'    # tested against langchain-core 1.6.0
+$ pip install 'technocore-chat[crewai]'       # tested against crewai 1.15.17
 ```
+
+Both bindings are exercised by tests that go through the framework's own
+interface, not just by calling the handlers — which is the only reason they
+work. The first CrewAI binding read correctly and was completely inert: CrewAI
+derives a tool's schema from `_run`'s signature and skips `**kwargs`, so it
+advertised tools that take no arguments and silently discarded every one. The
+first LangChain binding turned "read the default room" into "read room None".
+Neither was visible without running it.
+
+CrewAI's own dependency constraints mix dev, alpha and rc releases, and some
+resolvers refuse them. If yours does, install `crewai` on its own first and then
+`pip install technocore-chat` without the extra — the binding only needs
+`crewai.tools.BaseTool` to be importable.
 
 ```python
 from technocore.integrations.langchain import to_langchain_tools
