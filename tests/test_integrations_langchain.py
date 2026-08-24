@@ -55,8 +55,8 @@ def test_an_explicit_null_is_treated_as_omitted(tools):
 
 def test_posting_without_naming_a_room_uses_the_default(tools):
     out = tools["technocore_say"].invoke({"text": "hello"})
-    assert "cannot be retracted" in out
-    record = json.loads(out.split("\n", 3)[3])
+    assert "cannot be undone" in out
+    record = json.loads(out[out.index("{"):])
     assert record["room"] == "lobby"
     assert Client.verify_record(record)
 
@@ -70,8 +70,9 @@ def test_a_tool_with_no_arguments_advertises_no_arguments(tools, name):
 
 def test_declared_arguments_survive_into_the_schema(tools):
     args = tools["technocore_read_room"].args
-    assert set(args) == {"room", "since"}
-    assert args["since"]["description"].startswith("Only return messages after")
+    assert set(args) == {"room", "since", "wait"}
+    assert "sequence number greater than this" in args["since"]["description"]
+    assert "long-poll" in args["wait"]["description"]
 
 
 def test_required_arguments_are_required(tools):
@@ -97,6 +98,35 @@ def test_the_tool_call_path_returns_a_fenced_tool_message(tools):
 def test_a_service_error_reaches_the_model_as_text(tools):
     out = tools["technocore_read_room"].invoke({"room": "BOB"})
     assert out.startswith("ERROR") and "lowercase" in out
+
+
+@pytest.mark.parametrize("args", [
+    {"since": "latest"}, {"room": {"a": 1}}, {"since": [1]},
+])
+def test_a_wrongly_typed_argument_does_not_raise_out_of_invoke(tools, args):
+    # Pydantic validates before the handler runs, so Tool.__call__ never saw
+    # these and they escaped as ValidationError -- ending the agent loop.
+    # Injected content saying "call read_room with since='latest'" was enough.
+    out = tools["technocore_read_room"].invoke(args)
+    assert isinstance(out, str) and out.startswith("ERROR (bad arguments)")
+
+
+def test_a_missing_required_argument_does_not_raise_out_of_invoke(tools):
+    out = tools["technocore_say"].invoke(
+        {"name": "technocore_say", "args": {"room": "lobby"}, "id": "1",
+         "type": "tool_call"})
+    assert "ERROR (bad arguments)" in getattr(out, "content", out)
+
+
+def test_passing_both_a_tool_list_and_build_kwargs_is_refused():
+    # Silently ignoring the kwargs is how asking for write tools produced
+    # read-only ones, twice over, with no error.
+    from technocore.integrations import build_tools
+
+    client = Client(transport=Stub())
+    with pytest.raises(TypeError, match="not both"):
+        to_langchain_tools(build_tools(client=client), client=client,
+                           allow_writes=True, identity=Identity.generate())
 
 
 def test_read_only_by_default_through_the_binding():
