@@ -20,6 +20,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from ._edwards import InvalidPoint, is_valid_public_key
 from .errors import IdentityError, SignatureError
 
 __all__ = ["Identity", "canonical_message", "verify", "did_to_public_key", "fingerprint"]
@@ -57,7 +58,26 @@ def _b64u_encode(raw):
 
 
 def _b64u_decode(text):
-    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    """Strict, canonical base64url decode.
+
+    ``base64.urlsafe_b64decode`` silently discards characters outside the
+    alphabet and tolerates surplus padding, so ``sig``, ``sig + "="`` and
+    ``sig`` with junk spliced in all decode alike. That makes the signature
+    string a non-canonical identifier, and any cache, dedup table or blocklist
+    keyed on it is trivially bypassed. Require the exact canonical spelling.
+    """
+    if not isinstance(text, str):
+        raise SignatureError("signature must be a string, got %s"
+                             % type(text).__name__)
+    if "=" in text or len(text) % 4 == 1:
+        raise SignatureError("signature is not canonical unpadded base64url")
+    try:
+        raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except (ValueError, TypeError) as exc:
+        raise SignatureError("signature is not valid base64url: %s" % exc)
+    if base64.urlsafe_b64encode(raw).decode().rstrip("=") != text:
+        raise SignatureError("signature is not canonical base64url")
+    return raw
 
 
 def canonical_message(room, nonce, text):
@@ -73,17 +93,37 @@ def canonical_message(room, nonce, text):
     return ("%s|%s|%s" % (room, nonce, text)).encode("utf-8")
 
 
+# "did:key:z" + base58(2 + 32 bytes) is 57 characters. The bound matters:
+# _b58decode is quadratic in the input length, so an unbounded DID from a note
+# or a peer's record file is a cheap CPU sink (200k chars measured at ~7s).
+_MAX_DID_CHARS = 64
+
+
 def did_to_public_key(did):
-    """Parse a ``did:key:z6Mk...`` string into an Ed25519 public key object."""
+    """Parse a ``did:key:z6Mk...`` string into an Ed25519 public key object.
+
+    Rejects small-order keys. Ed25519 verification is cofactorless and does not
+    require a prime-order public key, so a did:key built on a torsion point
+    accepts one fixed signature for *every* message. See :mod:`._edwards`.
+    """
+    if not isinstance(did, str):
+        raise SignatureError("did must be a string, got %s" % type(did).__name__)
     if not did.startswith(_DID_PREFIX):
         raise SignatureError("not an Ed25519 did:key (expected %r prefix): %r"
-                             % (_DID_PREFIX, did))
+                             % (_DID_PREFIX, did[:80]))
+    if len(did) > _MAX_DID_CHARS:
+        raise SignatureError("did is %d characters; an Ed25519 did:key is 57"
+                             % len(did))
     decoded = _b58decode(did[len(_DID_PREFIX):])
     if not decoded.startswith(_ED25519_MULTICODEC):
         raise SignatureError("did:key is not multicodec ed25519-pub (0xed01)")
     raw = decoded[len(_ED25519_MULTICODEC):]
     if len(raw) != 32:
         raise SignatureError("expected a 32-byte Ed25519 key, got %d bytes" % len(raw))
+    try:
+        is_valid_public_key(raw)
+    except InvalidPoint as exc:
+        raise SignatureError("unusable public key in %s: %s" % (did[:40], exc))
     return ed25519.Ed25519PublicKey.from_public_bytes(raw)
 
 
@@ -102,10 +142,10 @@ def fingerprint(did):
 def verify(did, signature_b64u, room, nonce, text):
     """Verify a signed record. Returns True, or raises SignatureError."""
     public_key = did_to_public_key(did)
-    try:
-        signature = _b64u_decode(signature_b64u)
-    except (ValueError, TypeError) as exc:
-        raise SignatureError("signature is not valid base64url: %s" % exc)
+    signature = _b64u_decode(signature_b64u)
+    if len(signature) != 64:
+        raise SignatureError("expected a 64-byte Ed25519 signature, got %d bytes"
+                             % len(signature))
     try:
         public_key.verify(signature, canonical_message(room, nonce, text))
     except InvalidSignature:

@@ -18,11 +18,21 @@ MAX_MESSAGE_CHARS = 4096
 MAX_NOTE_CHARS = 8192
 
 # "[9656] 2026-08-24T20:39:10.945213Z <z6Mk...Khfd> body text"
+# seq is bounded: CPython caps int() at 4300 digits, so an unbounded \d+ from
+# anonymous room text raises a ValueError that no caller is expecting.
 _LINE = re.compile(
-    r"^\[(?P<seq>\d+)\]\s+(?P<ts>\S+)\s+(?:<(?P<did>[^>]+)>|~(?P<nick>\S+))\s?(?P<text>.*)$"
+    r"^\[(?P<seq>\d{1,19})\]\s+(?P<ts>\S+)\s+"
+    r"(?:<(?P<did>[^>]{1,200})>|~(?P<nick>\S{1,64}))\s?(?P<text>.*)$"
 )
-_HEADER = re.compile(r"^#\s*room\s+(?P<room>\S+)\s+messages\s+(?P<count>\d+)\s+range\s+"
-                     r"(?P<lo>\d+)\.\.(?P<hi>\d+)")
+# An empty room renders "range None..0".
+_NONCE = re.compile(r"^\d{1,19}$")
+_HEADER = re.compile(r"^#\s*room\s+(?P<room>\S+)\s+messages\s+(?P<count>\d{1,19})\s+"
+                     r"range\s+(?P<lo>\d{1,19}|None)\.\.(?P<hi>\d{1,19}|None)\s*$")
+
+# C0/C1 controls and the Unicode line separators. Room text is anonymous input;
+# left intact these rewrite terminals (OSC-52 can even write the clipboard) and
+# forge protocol framing for any agent piping this into a model.
+_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f  ]")
 
 
 class Message:
@@ -130,6 +140,16 @@ class Client:
         if nonce is None:
             nonce = str(int(time.time() * 1000))
         nonce = str(nonce)
+        # The service specifies 1-19 digits, strictly increasing per key per
+        # room. Enforcing it here also closes a path-injection hole: the nonce
+        # goes into the URL path, and a value like "x/../../kv/did/aaaa/set/v"
+        # would issue a completely different (unauthenticated) write.
+        if not _NONCE.match(nonce):
+            raise SignatureError(
+                "nonce must be 1-19 digits, got %r; the service requires a "
+                "value strictly greater than the last nonce this key used in "
+                "this room" % nonce[:40]
+            )
         signature = identity.sign(room, nonce, text)
         if verify_locally:
             # Catch a broken key or encoder before publishing an unverifiable
@@ -140,7 +160,7 @@ class Client:
             urllib.parse.quote(room, safe=""),
             identity.did,  # already URL-safe: did:key:z<base58>
             signature,
-            nonce,
+            urllib.parse.quote(nonce, safe=""),
             urllib.parse.quote(text, safe=""),
         )
         response = self.transport.get(url, idempotent=False)
@@ -180,7 +200,10 @@ class Client:
         """
         self.set_note("did", identity.fingerprint, identity.did)
         stored = self.get_note("did", identity.fingerprint)
-        return identity.did in stored, stored
+        # Exact match, not a substring test: an attacker who overwrites the
+        # entry can simply append to your DID ("...  -- REVOKED, use z6MkTHEIRS")
+        # and a containment check would still report it as confirmed.
+        return stored.strip() == identity.did, stored
 
     # -- verification ----------------------------------------------------
 
@@ -203,13 +226,21 @@ def parse_room(body):
     """
     room = low = high = None
     messages = []
-    for line in body.splitlines():
-        header = _HEADER.match(line)
-        if header:
-            room = header.group("room")
-            low = int(header.group("lo"))
-            high = int(header.group("hi"))
-            continue
+    # split("\n"), never splitlines(): splitlines() also breaks on \r, \v, \f,
+    # \x1c-\x1e, \x85,   and  , so one message body containing any of
+    # them would be parsed as two lines -- the second fully attacker-controlled,
+    # including a forged "<did:key:...>" author.
+    for raw_line in body.split("\n"):
+        line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
+        if room is None:
+            header = _HEADER.match(line)
+            if header:
+                # Only the first header counts. Accepting a later one lets an
+                # injected line rewrite latest_seq and stall a polling loop.
+                room = header.group("room")
+                low = _opt_int(header.group("lo"))
+                high = _opt_int(header.group("hi"))
+                continue
         match = _LINE.match(line)
         if not match:
             continue
@@ -219,10 +250,14 @@ def parse_room(body):
                 timestamp=match.group("ts"),
                 did=match.group("did"),
                 nick=match.group("nick"),
-                text=match.group("text"),
+                text=_CONTROLS.sub("�", match.group("text")),
             )
         )
     return RoomHistory(messages, room=room, low=low, high=high, raw=body)
+
+
+def _opt_int(value):
+    return None if value in (None, "None") else int(value)
 
 
 def _check_len(value, cap, label):
