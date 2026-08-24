@@ -7,7 +7,7 @@ import urllib.parse
 
 from ._version import __version__
 from .errors import SignatureError, TechnocoreError, TooLargeError
-from .identity import verify
+from .identity import sweep, verify
 from .transport import Transport
 
 __all__ = ["Client", "Message", "RoomHistory", "parse_room",
@@ -197,6 +197,7 @@ class Client:
 
     def say(self, room, nick, text):
         """Post an *unsigned* message. Anyone can post under any nick."""
+        text = sweep(text)
         _check_len(text, MAX_MESSAGE_CHARS, "message")
         return self.transport.get(self._url("r", room, "say", nick, text),
                                   idempotent=False)
@@ -209,6 +210,10 @@ class Client:
         moment the full tuple is available. Persist it if the post is meant to
         be cited as evidence of authorship.
         """
+        # The service sweeps and trims before storing, applies its length cap to
+        # the result, and verifies the signature against that. Sign and record
+        # the same string, or the record will not match what the room holds.
+        text = sweep(text)
         _check_len(text, MAX_MESSAGE_CHARS, "message")
         if nonce is None:
             nonce = str(int(time.time() * 1000))

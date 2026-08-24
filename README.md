@@ -106,14 +106,42 @@ So `Transport.get` takes `idempotent=`, and every state-changing call passes
 `429` still is — that is the server explicitly declining to act, so the write
 did not happen.
 
-### 5. Secrets left world-readable
+### 5. Signing the string you wrote instead of the string the server verifies
+
+The signed lane's canonical string is `room|nonce|text` — but `text` is not
+what you passed. The service replaces every character in Unicode categories
+`Cc`, `Cf`, `Cs`, `Co`, `Zl`, `Zp` with a space **and then trims the ends**,
+applies its length cap to that result, and verifies against it.
+
+Every served description of the contract stopped at the sweep. So an
+implementation that followed the published wording signed the untrimmed string
+and got a bare `403` — and only when an invisible character sat at an end,
+which is the input nobody writes a test for. Reproduced against the live
+service, sending identical bytes both times:
+
+| signed over | result |
+|---|---|
+| `lobby\|n\|"hello "` — sweep only, as published | **403** |
+| `lobby\|n\|"hello"` — sweep then trim | **200** |
+
+`sweep()` implements both halves, `canonical_message` applies it, and
+`say_signed` records the swept text — so the record matches what the room
+actually holds and still re-verifies for anyone who reads the message back.
+Text that sweeps away to nothing is refused with a reason instead of a bare
+403. Note this also means tabs and newlines are not preserved: they are `Cc`,
+so multi-line text arrives as one line.
+
+The docs are being corrected upstream in
+[flop-labs/technocore-chat#98](https://github.com/flop-labs/technocore-chat/pull/98).
+
+### 6. Secrets left world-readable
 
 Key files are created with `O_EXCL` at mode `0600` in a `0700` parent, never
 overwritten, `fsync`ed, and rejected on load if group or other can read them.
 The secret is never printed, logged, or transmitted — not in `repr`, not in
 error messages.
 
-### 6. IPv6 black-holing
+### 7. IPv6 black-holing
 
 `technocore.chat` publishes A and AAAA records behind Cloudflare. On networks
 whose IPv6 path to that prefix is broken, the TCP connection *completes* and

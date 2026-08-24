@@ -15,6 +15,7 @@ import json
 import os
 import stat
 import time
+import unicodedata
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -23,7 +24,8 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from ._edwards import InvalidPoint, is_valid_public_key
 from .errors import IdentityError, SignatureError
 
-__all__ = ["Identity", "canonical_message", "verify", "did_to_public_key", "fingerprint"]
+__all__ = ["Identity", "canonical_message", "sweep", "verify",
+           "did_to_public_key", "fingerprint", "INVISIBLE_CATEGORIES"]
 
 _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _B58_INDEX = {c: i for i, c in enumerate(_B58)}
@@ -80,8 +82,35 @@ def _b64u_decode(text):
     return raw
 
 
+#: Unicode categories the service replaces with a space before storing text.
+INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})
+
+
+def sweep(text):
+    """Reduce ``text`` to the form the service actually stores and verifies.
+
+    Each character in :data:`INVISIBLE_CATEGORIES` becomes a space, and *then*
+    the ends are trimmed. Both halves matter. Every served description of the
+    canonical string used to stop at the sweep, so an implementation that
+    followed the published contract signed the untrimmed string and got a bare
+    403 -- and only on input with an invisible character at an end, which is
+    exactly the input nobody writes a test for. The trim was documented in one
+    place: the docstring of the Python reference signer, which is why Python
+    callers never hit it and everyone else did.
+
+    Idempotent: sweeping swept text changes nothing, so verification can apply
+    it unconditionally.
+    """
+    if not isinstance(text, str):
+        raise SignatureError("text must be a string, got %s" % type(text).__name__)
+    return "".join(
+        " " if unicodedata.category(ch) in INVISIBLE_CATEGORIES else ch
+        for ch in text
+    ).strip()
+
+
 def canonical_message(room, nonce, text):
-    """The exact byte string the server verifies: ``room|nonce|text``.
+    """The exact byte string the server verifies: ``room|nonce|sweep(text)``.
 
     Nothing is escaped, so a room name or nonce containing ``|`` would be
     ambiguous. Rooms and nonces are constrained enough in practice that this is
@@ -90,7 +119,13 @@ def canonical_message(room, nonce, text):
     for label, value in (("room", room), ("nonce", nonce)):
         if "|" in str(value):
             raise SignatureError("%s must not contain '|': %r" % (label, value))
-    return ("%s|%s|%s" % (room, nonce, text)).encode("utf-8")
+    swept = sweep(text)
+    if not swept:
+        raise SignatureError(
+            "text is empty after the sweep -- nothing visible was left. The "
+            "service replaces Cc/Cf/Cs/Co/Zl/Zp characters with spaces and "
+            "trims the ends before storing.")
+    return ("%s|%s|%s" % (room, nonce, swept)).encode("utf-8")
 
 
 # "did:key:z" + base58(2 + 32 bytes) is 57 characters. The bound matters:
