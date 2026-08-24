@@ -8,13 +8,18 @@ to the AAAA address *completes* and then no bytes ever arrive, so the request
 dies on a read timeout rather than a connect error. Every retry picks the same
 dead address and stalls for the full timeout again.
 
-Observed 2026-08-24: ``curl https://technocore.chat/`` timed out at 10s, while
-``curl -4 https://technocore.chat/`` returned 200 from the same shell.
+That was the original rationale. It has not held up: re-measured on the same
+host, plain ``curl`` succeeds 5/5 while ``curl -4`` gets 3/5, and ``curl -6``
+fails at *connect* in under a millisecond because the host has no global IPv6
+address -- which is not black-holing, it is simply not having IPv6. The first
+observation is better explained by the service being slow and intermittently
+returning 503, which it does. See the README for the withdrawal.
 
-The fix is to pin the connection family to AF_INET. This module does it with a
-scoped opener rather than by monkey-patching ``socket.getaddrinfo`` globally,
-so importing this package does not change DNS behaviour for the rest of the
-host process.
+The pin stays because it is free and defensible on its own terms, not because a
+defect was demonstrated. It is done with a scoped opener rather than by
+monkey-patching ``socket.getaddrinfo`` globally, so importing this package does
+not change DNS behaviour for the rest of the host process, and it falls back to
+dual-stack.
 """
 
 import http.client

@@ -239,7 +239,20 @@ class Identity:
             )
             stored_did = data["did"]
         except (ValueError, KeyError, TypeError, OSError) as exc:
+            # Drop the parsed dict before raising: it holds the secret in hex,
+            # and the frame locals of a raise site are exactly what Sentry,
+            # rich and `pytest --showlocals` capture. An already-corrupt key
+            # file would otherwise ship an unrecoverable secret into a bug
+            # report. save() has dropped its copy since it was written; load()
+            # had not, which made "the secret is never printed, logged, or
+            # transmitted" false on this path.
+            data = None
+            del data
             raise IdentityError("%s is not a usable identity file: %s" % (path, exc))
+        # Same reason, for the mismatch raise below and any raise a later edit
+        # adds after this point.
+        data = None
+        del data
 
         identity = cls(private_key, stored_did)
         derived = identity.derive_did()
@@ -268,11 +281,10 @@ class Identity:
         return _DID_PREFIX + _b58encode(_ED25519_MULTICODEC + raw_pub)
 
     def save(self, path):
-        raw_priv = self._private_key.private_bytes(
-            serialization.Encoding.Raw,
-            serialization.PrivateFormat.Raw,
-            serialization.NoEncryption(),
-        )
+        # Extracted only once the file exists and is ours. Computing it up front
+        # left the raw key bound across the makedirs/O_EXCL raises below, which
+        # are the likely failures -- a refusal to overwrite is the common one --
+        # and a raise site's frame locals are what error reporters capture.
         parent = os.path.dirname(os.path.abspath(path))
         try:
             if parent:
@@ -288,6 +300,11 @@ class Identity:
         except OSError as exc:
             raise IdentityError("cannot create identity at %s: %s"
                                 % (path, exc.strerror or exc))
+        raw_priv = self._private_key.private_bytes(
+            serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw,
+            serialization.NoEncryption(),
+        )
         try:
             with os.fdopen(fd, "w") as handle:
                 json.dump(

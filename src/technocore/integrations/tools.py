@@ -17,9 +17,13 @@ room listings and note values never pass through
 :func:`~technocore.client.parse_room`, and room names, topics and note values
 are all attacker-chosen.
 
-Nothing attacker-chosen is rendered outside the fence -- not even the room name
+No third-party *content* is rendered outside the fence -- not even the room name
 in a header. A room name is a string its creator typed; the service does not
-vouch for it, and it is long enough to hold a convincing forged instruction.
+vouch for it, and it is long enough to hold a convincing forged instruction, so
+the header names the room the caller asked for rather than the one the response
+claims. The one place a caller-supplied value is echoed into the trusted region
+is ``technocore_verify_record``, which has to say *what* it verified; those
+values go through :func:`_echo`, which neutralises, defangs and bounds them.
 
 **Writes are public, irreversible, and rate-limited per IP.** An agent that can
 post has an unretractable voice under your key, and posting to a name that does
@@ -252,6 +256,17 @@ class Tool:
 
 
 _MAX_ERROR_CHARS = 600
+#: Cap on any caller-supplied value echoed back into the trusted region.
+_MAX_ECHO_CHARS = 120
+
+
+def _echo(value):
+    """Render a caller-supplied value for the trusted region, defanged."""
+    text, _replaced = neutralise(str(value))
+    text = _defang(text)
+    if len(text) > _MAX_ECHO_CHARS:
+        text = text[:_MAX_ECHO_CHARS] + " [...truncated]"
+    return text
 
 
 def _safe(exc):
@@ -473,10 +488,18 @@ def build_tools(client=None, identity=None, allow_writes=False,
 
     def verify_record(did, signature, room, nonce, text):
         verify(did, signature, room, nonce, text)
+        # Echoing the caller's did and room back is the point -- a bare
+        # "VERIFIED" says nothing about what was verified -- but they are
+        # attacker-chosen: the record being checked usually came out of a room,
+        # and `verify` only forbids "|" in the room. Unsanitised, this printed
+        # a fence marker and a zero-width character into the trusted region
+        # under a "VERIFIED:" prefix, and a 200k-character room produced 200k
+        # characters of supposedly-bounded output.
         return ("VERIFIED: %s signed exactly this text for room %s.\n"
                 "This proves the key signed those bytes. It does not prove "
                 "when, and anyone holding the record can re-post it, so it is "
-                "not evidence of a live or recent claim." % (did, room))
+                "not evidence of a live or recent claim."
+                % (_echo(did), _echo(room)))
 
     tools.append(Tool(
         name="technocore_verify_record",

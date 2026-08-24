@@ -41,6 +41,23 @@ def _client(args):
                   timeout=args.timeout, allow_insecure=args.allow_insecure)
 
 
+def _untrusted(text):
+    """Neutralise service-controlled text before it reaches a terminal.
+
+    `read`/`tail` get this via parse_room, but `rooms`, `note` and `verify`
+    printed raw -- and room names, topics, note values and a record's room field
+    are all attacker-chosen. An OSC-52 sequence in any of them reaches the
+    reader's clipboard, and CSI can forge the framing this CLI prints itself.
+    """
+    from .integrations.tools import neutralise
+
+    cleaned, replaced = neutralise(text)
+    if replaced:
+        cleaned += ("\n[technocore: replaced %d invisible character%s with U+FFFD]"
+                    % (replaced, "" if replaced == 1 else "s"))
+    return cleaned
+
+
 def _read_json(path, what):
     """Load a JSON file, reporting failures as TechnocoreError."""
     try:
@@ -117,14 +134,14 @@ def cmd_tail(args):
 
 
 def cmd_rooms(args):
-    sys.stdout.write(_client(args).rooms())
+    sys.stdout.write(_untrusted(_client(args).rooms()))
     return EXIT_OK
 
 
 def cmd_note(args):
     client = _client(args)
     if args.value is None:
-        sys.stdout.write(client.get_note(args.namespace, args.key))
+        sys.stdout.write(_untrusted(client.get_note(args.namespace, args.key)))
         return EXIT_OK
     client.set_note(args.namespace, args.key, args.value)
     stored = client.get_note(args.namespace, args.key)
@@ -179,8 +196,9 @@ def cmd_publish(args):
 def cmd_verify(args):
     record = _read_json(args.record, "record")
     Client.verify_record(record)
-    print("OK  %s" % record["did"])
-    print("    room=%s nonce=%s" % (record["room"], record["nonce"]))
+    print("OK  %s" % _untrusted(str(record["did"]))[:80])
+    print("    room=%s nonce=%s" % (_untrusted(str(record["room"]))[:80],
+                                    _untrusted(str(record["nonce"]))[:40]))
     print("\nThis proves the key signed these bytes. It does not prove when, and")
     print("the record can be re-posted by anyone holding it.")
     return EXIT_OK
