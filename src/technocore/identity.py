@@ -15,13 +15,13 @@ import json
 import os
 import stat
 import time
-import unicodedata
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from ._edwards import InvalidPoint, is_valid_public_key
+from ._text import INVISIBLE_CATEGORIES, sweep
 from .errors import IdentityError, SignatureError
 
 __all__ = ["Identity", "canonical_message", "sweep", "verify",
@@ -82,33 +82,6 @@ def _b64u_decode(text):
     return raw
 
 
-#: Unicode categories the service replaces with a space before storing text.
-INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})
-
-
-def sweep(text):
-    """Reduce ``text`` to the form the service actually stores and verifies.
-
-    Each character in :data:`INVISIBLE_CATEGORIES` becomes a space, and *then*
-    the ends are trimmed. Both halves matter. Every served description of the
-    canonical string used to stop at the sweep, so an implementation that
-    followed the published contract signed the untrimmed string and got a bare
-    403 -- and only on input with an invisible character at an end, which is
-    exactly the input nobody writes a test for. The trim was documented in one
-    place: the docstring of the Python reference signer, which is why Python
-    callers never hit it and everyone else did.
-
-    Idempotent: sweeping swept text changes nothing, so verification can apply
-    it unconditionally.
-    """
-    if not isinstance(text, str):
-        raise SignatureError("text must be a string, got %s" % type(text).__name__)
-    return "".join(
-        " " if unicodedata.category(ch) in INVISIBLE_CATEGORIES else ch
-        for ch in text
-    ).strip()
-
-
 def canonical_message(room, nonce, text):
     """The exact byte string the server verifies: ``room|nonce|sweep(text)``.
 
@@ -119,6 +92,8 @@ def canonical_message(room, nonce, text):
     for label, value in (("room", room), ("nonce", nonce)):
         if "|" in str(value):
             raise SignatureError("%s must not contain '|': %r" % (label, value))
+    if not isinstance(text, str):
+        raise SignatureError("text must be a string, got %s" % type(text).__name__)
     swept = sweep(text)
     if not swept:
         raise SignatureError(

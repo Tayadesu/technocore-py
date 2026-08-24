@@ -70,11 +70,36 @@ def test_the_base_point_and_real_keys_are_not_rejected():
         assert did_to_public_key(identity.did)
 
 
-def test_off_curve_and_non_canonical_encodings_are_rejected():
-    # y >= p would give one point several distinct DIDs.
-    non_canonical = "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+def test_a_non_canonical_y_coordinate_is_rejected():
+    # y >= p would give one point several distinct DIDs. The previous vector
+    # here had y == p-1, which is canonical -- so this passed with the check
+    # deleted. p = 2**255 - 19; this is p itself, little-endian.
+    y_equals_p = (2 ** 255 - 19).to_bytes(32, "little").hex()
     with pytest.raises(SignatureError):
-        did_to_public_key(_did_from_public_bytes(non_canonical))
+        did_to_public_key(_did_from_public_bytes(y_equals_p))
+
+
+def test_an_off_curve_point_is_rejected():
+    # No y with this value satisfies the curve equation.
+    for candidate in range(2, 400):
+        raw = candidate.to_bytes(32, "little").hex()
+        try:
+            did_to_public_key(_did_from_public_bytes(raw))
+        except SignatureError:
+            return
+    pytest.fail("expected at least one off-curve y in the search range")
+
+
+def test_a_did_with_a_different_multicodec_is_rejected():
+    # A real X25519 did:key: prefix 0xec01 and exactly 32 bytes, so the length
+    # check cannot catch it -- only the multicodec check can. The old vector
+    # decoded to 28 bytes and was caught by length, leaving this uncovered.
+    x25519 = "ec01" + "11" * 32
+    from technocore.identity import _b58encode
+
+    did = "did:key:z" + _b58encode(bytes.fromhex(x25519))
+    with pytest.raises(SignatureError, match="multicodec"):
+        did_to_public_key(did)
 
 
 # -- HIGH: forged "signed" lines injected through one message body ------------
@@ -174,7 +199,12 @@ def test_only_the_canonical_signature_spelling_is_accepted():
     identity = Identity.generate()
     sig = identity.sign("lobby", "1", "hi")
     assert verify(identity.did, sig, "lobby", "1", "hi")
-    for variant in [sig + "=", sig + "====", sig[:20] + "!*&" + sig[20:], sig[:-1]]:
+    # sig + "==" and a 4-char splice keep len % 4 == 0, so they get past the
+    # padding guard and only the canonical re-encode check catches them.
+    # Without them, either guard alone passed this test.
+    for variant in [sig + "=", sig + "==", sig + "====",
+                    sig[:20] + "!*&" + sig[20:], sig[:20] + "!*&%" + sig[20:],
+                    sig[:-1]]:
         with pytest.raises(SignatureError):
             verify(identity.did, variant, "lobby", "1", "hi")
 

@@ -268,7 +268,10 @@ def test_retry_after_is_capped_so_a_bad_header_cannot_stall_a_caller():
     transport._openers = lambda _idempotent=True: (Opener(),)
     with pytest.raises(RateLimitError):
         transport.get("https://example.invalid/x")
-    assert delays == [MAX_RETRY_AFTER]
+    # The literal, not the constant: importing it from the code under test
+    # means the cap can be changed to anything and this still passes.
+    assert delays == [60.0]
+    assert MAX_RETRY_AFTER == 60.0
 
 
 def test_transport_error_names_the_url_and_reason():

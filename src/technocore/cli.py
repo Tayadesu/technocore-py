@@ -27,6 +27,7 @@ import stat
 import sys
 
 from . import __version__
+from ._text import neutralise
 from .client import Client, DEFAULT_BASE_URL, MAX_WAIT_SECONDS
 from .errors import NoteLimitError, SignatureError, TechnocoreError
 from .identity import Identity, IdentityError
@@ -49,8 +50,6 @@ def _untrusted(text):
     are all attacker-chosen. An OSC-52 sequence in any of them reaches the
     reader's clipboard, and CSI can forge the framing this CLI prints itself.
     """
-    from .integrations.tools import neutralise
-
     cleaned, replaced = neutralise(text)
     if replaced:
         cleaned += ("\n[technocore: replaced %d invisible character%s with U+FFFD]"
@@ -145,7 +144,7 @@ def cmd_note(args):
         return EXIT_OK
     client.set_note(args.namespace, args.key, args.value)
     stored = client.get_note(args.namespace, args.key)
-    ok = stored.strip() == args.value
+    ok = stored.strip() == args.value.strip()   # the service trims
     print("wrote %s/%s -> %s" % (args.namespace, args.key,
                                  "confirmed" if ok else "MISMATCH"))
     return EXIT_OK if ok else EXIT_UNWANTED
@@ -153,12 +152,16 @@ def cmd_note(args):
 
 def cmd_say(args):
     identity = Identity.load(args.key_file)
+    # Before posting, not after: the post is irreversible and spends a per-IP
+    # write, so failing afterwards discarded the very record the message says
+    # is the only copy of unretractable proof.
+    if args.record and os.path.exists(args.record) and not args.force:
+        raise TechnocoreError(
+            "%s already exists; a record is the only copy of unretractable "
+            "proof, and posting would overwrite it. Pass --force to overwrite, "
+            "or choose another path." % args.record)
     response, record = _client(args).say_signed(identity, args.room, args.text)
     if args.record:
-        if os.path.exists(args.record) and not args.force:
-            raise TechnocoreError(
-                "%s already exists; a record is the only copy of unretractable "
-                "proof. Pass --force to overwrite." % args.record)
         with open(args.record, "w") as handle:
             json.dump(record, handle, indent=2)
         print("record written to %s" % args.record, file=sys.stderr)
@@ -196,9 +199,9 @@ def cmd_publish(args):
 def cmd_verify(args):
     record = _read_json(args.record, "record")
     Client.verify_record(record)
-    print("OK  %s" % _untrusted(str(record["did"]))[:80])
-    print("    room=%s nonce=%s" % (_untrusted(str(record["room"]))[:80],
-                                    _untrusted(str(record["nonce"]))[:40]))
+    print("OK  %s" % _untrusted(str(record["did"])[:80]))
+    print("    room=%s nonce=%s" % (_untrusted(str(record["room"])[:80]),
+                                    _untrusted(str(record["nonce"])[:40])))
     print("\nThis proves the key signed these bytes. It does not prove when, and")
     print("the record can be re-posted by anyone holding it.")
     return EXIT_OK

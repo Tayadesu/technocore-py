@@ -7,6 +7,7 @@ import urllib.parse
 
 from ._version import __version__
 from .errors import SignatureError, TechnocoreError, TooLargeError
+from ._text import neutralise
 from .identity import sweep, verify
 from .transport import Transport
 
@@ -39,10 +40,6 @@ _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 _HEADER = re.compile(r"^#\s*room\s+(?P<room>\S+)\s+messages\s+(?P<count>\d{1,19})\s+"
                      r"range\s+(?P<lo>\d{1,19}|None)\.\.(?P<hi>\d{1,19}|None)\s*$")
 
-# C0/C1 controls and the Unicode line separators. Room text is anonymous input;
-# left intact these rewrite terminals (OSC-52 can even write the clipboard) and
-# forge protocol framing for any agent piping this into a model.
-_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f  ]")
 
 
 class Message:
@@ -168,13 +165,20 @@ class Client:
         cursor = since
         while True:
             history = self.read(room, since=cursor, wait=wait)
+            highest = cursor
             for message in history:
                 if cursor is None or message.seq > cursor:
                     yield message
-            if history.latest_seq is not None:
-                cursor = history.latest_seq
-            elif history:
-                cursor = max(m.seq for m in history)
+                if highest is None or message.seq > highest:
+                    highest = message.seq
+            # Advance past everything actually yielded, and never backwards.
+            # Taking the header's `high` on its own re-yielded the same message
+            # forever whenever a rendered line's sequence exceeded it -- the
+            # headline streaming API turning into an infinite duplicate flood.
+            candidates = [c for c in (highest, history.latest_seq, cursor)
+                          if c is not None]
+            if candidates:
+                cursor = max(candidates)
 
     def rooms(self):
         """Raw text of the public room directory."""
@@ -277,6 +281,9 @@ class Client:
         """
         _check_name(namespace, "namespace")
         _check_name(key, "key")
+        if not isinstance(value, str):
+            raise TechnocoreError("note value must be a string, got %s"
+                                  % type(value).__name__)
         _check_len(value, MAX_NOTE_CHARS, "note")
         return self.transport.get(self._url("kv", namespace, key, "set", value),
                                   idempotent=False)
@@ -337,13 +344,20 @@ def parse_room(body):
         match = _LINE.match(line)
         if not match:
             continue
+        # Every field, not only the text. _LINE deliberately does not enforce
+        # the server's name rule, so a hostile or compromised instance can put
+        # an escape sequence in the author or the timestamp -- and the CLI
+        # prints all three. Sanitising only `text` made the comment claiming
+        # otherwise false for two of the four.
         messages.append(
             Message(
                 seq=int(match.group("seq")),
-                timestamp=match.group("ts"),
-                did=match.group("did"),
-                nick=match.group("nick"),
-                text=_CONTROLS.sub("�", match.group("text")),
+                timestamp=neutralise(match.group("ts"))[0],
+                did=(neutralise(match.group("did"))[0]
+                     if match.group("did") is not None else None),
+                nick=(neutralise(match.group("nick"))[0]
+                      if match.group("nick") is not None else None),
+                text=neutralise(match.group("text"))[0],
             )
         )
     return RoomHistory(messages, room=room, low=low, high=high, raw=body)

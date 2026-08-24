@@ -114,6 +114,9 @@ def test_a_service_error_comes_back_as_text_the_model_can_act_on():
     out = tools["technocore_read_room"](room="BOB")
     assert out.startswith("ERROR")
     assert "lowercase" in out
+    # Without this, deleting the `except TechnocoreError` arm still passes:
+    # the text becomes "ERROR (unexpected TechnocoreError)" and both hold.
+    assert "unexpected" not in out
 
 
 def test_an_invented_argument_does_not_crash_the_tool():
@@ -197,13 +200,21 @@ def test_langchain_binding_explains_what_to_install_when_absent(monkeypatch):
         binding.to_langchain_tools(client=Client(transport=Stub()))
 
 
-def test_crewai_binding_explains_what_to_install_when_absent():
-    try:
-        import crewai  # noqa: F401
-    except ImportError:
-        from technocore.integrations import crewai as binding
-        with pytest.raises(ImportError, match="crewai"):
-            binding.to_crewai_tools(client=Client(transport=Stub()))
+def test_crewai_binding_explains_what_to_install_when_absent(monkeypatch):
+    # Simulate the absence. Its langchain sibling already carries a comment
+    # saying this exact defect was fixed there; the copy here kept it.
+    from technocore.integrations import crewai as binding
+
+    real_import = builtins.__import__
+
+    def missing(name, *args, **kwargs):
+        if name.startswith("crewai"):
+            raise ImportError("no crewai")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing)
+    with pytest.raises(ImportError, match="pip install"):
+        binding.to_crewai_tools(client=Client(transport=Stub()))
 
 
 def test_tool_repr_marks_write_tools():

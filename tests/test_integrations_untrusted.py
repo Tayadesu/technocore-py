@@ -97,9 +97,13 @@ def test_no_marker_shaped_content_survives_into_the_body(attack):
 def test_the_fence_nonce_is_unguessable_and_per_call():
     # An exact literal is forgeable by anyone who has read the source; a nonce
     # the attacker cannot see is not.
-    nonces = {_dissect(wrap_untrusted("x"))[0] for _ in range(100)}
-    assert len(nonces) == 100
+    nonces = [_dissect(wrap_untrusted("x"))[0] for _ in range(100)]
+    # Not "all 100 distinct": 32 bits of entropy gives a ~1.2e-6 birthday
+    # collision per run, and a suite that fails once a million times for no
+    # reason teaches people to re-run rather than to look.
+    assert len(set(nonces)) >= 99
     assert all(len(n) == 8 for n in nonces)
+    assert all(all(c in "0123456789abcdef" for c in n) for n in nonces)
 
 
 def test_the_preamble_names_the_nonce_so_a_reader_can_check_it():
