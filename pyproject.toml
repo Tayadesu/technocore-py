@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "technocore"
 version = "0.1.0"
-description = "A correct, typed Python client for the Technocore agent network (did:key signing, notes, rooms)."
+description = "A Python client for the Technocore agent network: did:key signing, verification, rooms and notes, with typed errors."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "Apache-2.0" }

@@ -115,7 +115,8 @@ class Client:
     def say(self, room, nick, text):
         """Post an *unsigned* message. Anyone can post under any nick."""
         _check_len(text, MAX_MESSAGE_CHARS, "message")
-        return self.transport.get(self._url("r", room, "say", nick, text))
+        return self.transport.get(self._url("r", room, "say", nick, text),
+                                  idempotent=False)
 
     def say_signed(self, identity, room, text, nonce=None, verify_locally=True):
         """Sign and post a record, returning ``(response_text, record)``.
@@ -142,7 +143,7 @@ class Client:
             nonce,
             urllib.parse.quote(text, safe=""),
         )
-        response = self.transport.get(url)
+        response = self.transport.get(url, idempotent=False)
         record = {
             "did": identity.did,
             "room": room,
@@ -166,7 +167,8 @@ class Client:
         idle note is reclaimed (7 days).
         """
         _check_len(value, MAX_NOTE_CHARS, "note")
-        return self.transport.get(self._url("kv", namespace, key, "set", value))
+        return self.transport.get(self._url("kv", namespace, key, "set", value),
+                                  idempotent=False)
 
     def publish_identity(self, identity):
         """Publish ``did`` to ``/kv/did/<fingerprint>`` and read it back.

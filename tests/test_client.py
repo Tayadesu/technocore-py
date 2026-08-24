@@ -28,10 +28,12 @@ class FakeTransport:
 
     def __init__(self, responses=None):
         self.urls = []
+        self.idempotency = []
         self._responses = list(responses or [])
 
-    def get(self, url):
+    def get(self, url, idempotent=True):
         self.urls.append(url)
+        self.idempotency.append(idempotent)
         if not self._responses:
             return ""
         response = self._responses.pop(0)
@@ -147,7 +149,7 @@ class _FakeResponse:
 
 def _transport_with(opener):
     transport = Transport("t", attempts=3, backoff=0, sleep=lambda _s: None)
-    transport._openers = lambda: (opener,)
+    transport._openers = lambda _idempotent=True: (opener,)
     return transport
 
 
@@ -249,7 +251,7 @@ def test_retry_after_is_honoured():
         def open(self, _req, timeout=None):
             raise _http_error(429, "slow down", {"Retry-After": "5"})
 
-    transport._openers = lambda: (Opener(),)
+    transport._openers = lambda _idempotent=True: (Opener(),)
     with pytest.raises(RateLimitError):
         transport.get("https://example.invalid/x")
     assert delays == [5.0, 5.0]
@@ -263,7 +265,7 @@ def test_retry_after_is_capped_so_a_bad_header_cannot_stall_a_caller():
         def open(self, _req, timeout=None):
             raise _http_error(429, "slow down", {"Retry-After": "99999"})
 
-    transport._openers = lambda: (Opener(),)
+    transport._openers = lambda _idempotent=True: (Opener(),)
     with pytest.raises(RateLimitError):
         transport.get("https://example.invalid/x")
     assert delays == [MAX_RETRY_AFTER]

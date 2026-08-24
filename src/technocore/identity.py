@@ -150,13 +150,17 @@ class Identity:
         try:
             with open(path) as handle:
                 data = json.load(handle)
+            # Every field access belongs inside this block: a KeyError escaping
+            # here would bypass the TechnocoreError contract the CLI relies on
+            # and surface as a traceback instead of an actionable message.
             private_key = ed25519.Ed25519PrivateKey.from_private_bytes(
                 bytes.fromhex(data["private_key_hex"])
             )
-        except (ValueError, KeyError, TypeError) as exc:
+            stored_did = data["did"]
+        except (ValueError, KeyError, TypeError, OSError) as exc:
             raise IdentityError("%s is not a usable identity file: %s" % (path, exc))
 
-        identity = cls(private_key, data["did"])
+        identity = cls(private_key, stored_did)
         derived = identity.derive_did()
         if identity.did != derived:
             raise IdentityError(

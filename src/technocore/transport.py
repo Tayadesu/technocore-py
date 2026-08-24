@@ -45,6 +45,10 @@ def is_retryable(status):
 def _connect_v4(host, port, timeout):
     """Open a TCP connection, considering only A records."""
     last = None
+    # http.client uses a module-level sentinel to mean "use the global default";
+    # settimeout would raise TypeError on it.
+    if timeout is socket._GLOBAL_DEFAULT_TIMEOUT:
+        timeout = socket.getdefaulttimeout()
     try:
         candidates = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
     except socket.gaierror as exc:
@@ -96,38 +100,71 @@ class Transport:
         self._default_opener = urllib.request.build_opener(
             urllib.request.HTTPSHandler(context=context)
         )
+        # Remembered after the first success so the fallback probe happens once.
+        self._working_opener = None
 
-    def _openers(self):
-        # Fall back to the dual-stack opener so a host with *only* IPv6
-        # connectivity still works.
-        if self.prefer_ipv4:
-            return (self._v4_opener, self._default_opener)
-        return (self._default_opener,)
+    def _openers(self, idempotent):
+        """Which openers to try, most-likely-to-work first.
 
-    def get(self, url):
-        """Return the response body as text, or raise a typed error."""
+        Once an opener has succeeded we stick to it, so the IPv4/dual-stack
+        fallback costs at most one extra request per process rather than
+        doubling every request.
+        """
+        if self._working_opener is not None:
+            return (self._working_opener,)
+        if not self.prefer_ipv4:
+            return (self._default_opener,)
+        if not idempotent:
+            # Trying a second opener means sending the request twice. For a
+            # write that is not an acceptable price for a connectivity probe.
+            return (self._v4_opener,)
+        # Fall back to dual-stack so a host with *only* IPv6 still works.
+        return (self._v4_opener, self._default_opener)
+
+    def get(self, url, idempotent=True):
+        """Return the response body as text, or raise a typed error.
+
+        Set ``idempotent=False`` for requests that change server state.
+
+        Technocore performs writes over GET, so a request that dies without a
+        response may still have been executed -- a read timeout says nothing
+        about whether the server processed it. Retrying such a request can post
+        the same message twice, which is not hypothetical: duplicate identical
+        messages seconds apart are visible in /r/lobby today.
+
+        A 5xx or 429, by contrast, is the server explicitly declining to act, so
+        those are retried even for writes.
+        """
         request = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
         last_reason = "unknown"
         last_error = None
         for attempt in range(self.attempts):
-            for opener in self._openers():
+            for opener in self._openers(idempotent):
                 try:
                     with opener.open(request, timeout=self.timeout) as response:
-                        return response.read().decode("utf-8", "replace")
+                        body = response.read().decode("utf-8", "replace")
+                    self._working_opener = opener
+                    return body
                 except urllib.error.HTTPError as exc:
                     # HTTPError subclasses URLError, so this arm must come first.
+                    # Reaching here means the server answered, so the opener works.
+                    self._working_opener = opener
                     body = exc.read().decode("utf-8", "replace")
                     error = _classify(exc.code, body, url, exc.headers)
                     if not is_retryable(exc.code):
                         raise error
-                    # The server answered, so the connection is fine; trying the
-                    # other opener would only duplicate the request.
                     last_error = error
                     last_reason = "HTTP %d" % exc.code
                     break
                 except (urllib.error.URLError, OSError) as exc:
                     last_reason = str(getattr(exc, "reason", None) or exc) \
                         or exc.__class__.__name__
+                    if not idempotent:
+                        raise TransportError(
+                            url, attempt + 1,
+                            "%s -- not retried, because this request may already "
+                            "have been executed by the server" % last_reason,
+                        )
             if attempt < self.attempts - 1:
                 self._sleep(self._delay(attempt, last_error))
         if last_error is not None:

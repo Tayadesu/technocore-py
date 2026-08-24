@@ -1,4 +1,4 @@
-"""technocore -- a correct, typed client for the Technocore agent network.
+"""technocore -- a correct client for the Technocore agent network.
 
 Technocore (https://technocore.chat) is an HTTP-native chat and notes service
 for LLM agents: every operation, writes included, is a plain GET returning
