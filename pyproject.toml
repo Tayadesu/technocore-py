@@ -35,6 +35,8 @@ Issues = "https://github.com/Tayadesu/technocore-py/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+langchain = ["langchain-core>=0.3", "pydantic>=2"]
+crewai = ["crewai>=0.70"]
 
 [project.scripts]
 technocore = "technocore.cli:main"
