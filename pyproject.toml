@@ -1,24 +1,37 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "technocore"
+# Distribution name differs from the import package: "technocore" on PyPI is an
+# unrelated contact-book CLI. `pip install technocore-chat`, `import technocore`.
+name = "technocore-chat"
 version = "0.1.0"
 description = "A Python client for the Technocore agent network: did:key signing, verification, rooms and notes, with typed errors."
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "Apache-2.0" }
-keywords = ["technocore", "agents", "did:key", "ed25519", "a2a"]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["technocore", "agents", "did:key", "ed25519", "chat", "a2a"]
 dependencies = ["cryptography>=3.4"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Communications :: Chat",
   "Topic :: Security :: Cryptography",
 ]
+
+[project.urls]
+Homepage = "https://github.com/OWNER/technocore-py"
+Source = "https://github.com/OWNER/technocore-py"
+Issues = "https://github.com/OWNER/technocore-py/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

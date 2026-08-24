@@ -1,36 +1,56 @@
-"""Command-line interface: ``python -m technocore ...``
+"""Command-line interface for the Technocore agent network.
 
 Subcommands
------------
-``keygen``    create an Ed25519 did:key identity (0600, never overwrites)
-``whoami``    print the DID and registry fingerprint for a key file
-``read``      dump a room's recent history
-``say``       post a signed message and emit a re-verifiable record
-``publish``   write the identity note to /kv/did/<fingerprint> and read it back
-``verify``    check a saved record offline
-``doctor``    diagnose connectivity, key permissions, and service limits
+  keygen     create an Ed25519 did:key identity (mode 0600, never overwritten)
+  whoami     print the DID and registry fingerprint for a key file
+  read       print a room's recent history
+  tail       follow a room, long-polling as messages arrive
+  rooms      list the public room directory
+  say        post a signed message and emit a re-verifiable record
+  note       read or write a key-value note
+  publish    write the identity note to /kv/did/<fingerprint>, then read it back
+  verify     check a saved record offline
+  doctor     diagnose connectivity, key permissions, and service limits
+
+Exit codes
+  0  success
+  1  a handled failure (network, HTTP, bad signature, unusable key file)
+  2  the command ran but the result is not what you want (insecure key
+     permissions, a registry entry that is not yours, a full namespace)
+  3  an unexpected error -- please report it
 """
 
 import argparse
 import json
 import os
+import stat
 import sys
 
 from . import __version__
-from .client import Client, DEFAULT_BASE_URL
-from .errors import NoteLimitError, TechnocoreError
-from .identity import Identity
+from .client import Client, DEFAULT_BASE_URL, MAX_WAIT_SECONDS
+from .errors import NoteLimitError, SignatureError, TechnocoreError
+from .identity import Identity, IdentityError
 
-DEFAULT_KEY_FILE = "technocore_identity.json"
+DEFAULT_KEY_FILE = os.environ.get("TECHNOCORE_KEY_FILE", "technocore_identity.json")
+
+EXIT_OK, EXIT_FAILED, EXIT_UNWANTED, EXIT_BUG = 0, 1, 2, 3
 
 
 def _client(args):
     return Client(base_url=args.base_url, prefer_ipv4=not args.no_ipv4_pin,
-                  timeout=args.timeout)
+                  timeout=args.timeout, allow_insecure=args.allow_insecure)
 
 
-def _load(args):
-    return Identity.load(args.key_file)
+def _read_json(path, what):
+    """Load a JSON file, reporting failures as TechnocoreError."""
+    try:
+        with open(path) as handle:
+            return json.load(handle)
+    except OSError as exc:
+        raise TechnocoreError("cannot read %s %s: %s"
+                              % (what, path, exc.strerror or exc))
+    except ValueError as exc:
+        raise TechnocoreError("%s %s is not valid JSON: %s" % (what, path, exc))
 
 
 def cmd_keygen(args):
@@ -38,7 +58,7 @@ def cmd_keygen(args):
         identity = Identity.load(args.key_file)
         print("identity already exists at %s" % args.key_file)
         print("did: %s" % identity.did)
-        return 0
+        return EXIT_OK
     identity = Identity.generate()
     identity.save(args.key_file)
     print("did        : %s" % identity.did)
@@ -46,53 +66,100 @@ def cmd_keygen(args):
     print("key file   : %s (mode 600)" % args.key_file)
     print("\nBack this file up. The secret in it is the only proof of authorship;")
     print("it is not recoverable and no service can reissue it.")
-    return 0
+    return EXIT_OK
 
 
 def cmd_whoami(args):
-    identity = _load(args)
-    print("did        : %s" % identity.did)
-    print("fingerprint: %s" % identity.fingerprint)
-    return 0
+    identity = Identity.load(args.key_file)
+    if args.json:
+        json.dump({"did": identity.did, "fingerprint": identity.fingerprint},
+                  sys.stdout, indent=2)
+        print()
+    else:
+        print("did        : %s" % identity.did)
+        print("fingerprint: %s" % identity.fingerprint)
+    return EXIT_OK
+
+
+def _emit(message, as_json):
+    if as_json:
+        json.dump({"seq": message.seq, "timestamp": message.timestamp,
+                   "did": message.did, "nick": message.nick,
+                   "text": message.text}, sys.stdout)
+        print()
+    else:
+        # Room text is anonymous input. parse_room has already stripped control
+        # characters; it is still data, never instructions.
+        print("[%d] %s %s  %s" % (message.seq, message.timestamp, message.author,
+                                  message.text))
 
 
 def cmd_read(args):
-    history = _client(args).read(args.room)
-    print("# room %s  range %s..%s  (%d shown)"
-          % (history.room, history.low, history.high, len(history)))
-    if args.signed_only:
-        selected = [m for m in history if m.signed]
-    else:
-        selected = list(history)
-    for message in selected:
-        # Room content is written by anonymous third parties. It is printed as
-        # data; never let a caller treat it as instructions.
-        print("[%d] %s %s  %s" % (message.seq, message.timestamp, message.author,
-                                  message.text))
-    return 0
+    history = _client(args).read(args.room, since=args.since)
+    shown = [m for m in history if m.did] if args.with_did else list(history)
+    if not args.json:
+        print("# room %s  range %s..%s  (%d of %d shown)"
+              % (args.room, history.low, history.high, len(shown), len(history)))
+    for message in shown:
+        _emit(message, args.json)
+    return EXIT_OK
+
+
+def cmd_tail(args):
+    client = _client(args)
+    since = args.since
+    if since is None:
+        since = client.read(args.room).latest_seq
+    for message in client.follow(args.room, since=since, wait=args.wait):
+        _emit(message, args.json)
+        sys.stdout.flush()
+    return EXIT_OK
+
+
+def cmd_rooms(args):
+    sys.stdout.write(_client(args).rooms())
+    return EXIT_OK
+
+
+def cmd_note(args):
+    client = _client(args)
+    if args.value is None:
+        sys.stdout.write(client.get_note(args.namespace, args.key))
+        return EXIT_OK
+    client.set_note(args.namespace, args.key, args.value)
+    stored = client.get_note(args.namespace, args.key)
+    ok = stored.strip() == args.value
+    print("wrote %s/%s -> %s" % (args.namespace, args.key,
+                                 "confirmed" if ok else "MISMATCH"))
+    return EXIT_OK if ok else EXIT_UNWANTED
 
 
 def cmd_say(args):
-    identity = _load(args)
+    identity = Identity.load(args.key_file)
     response, record = _client(args).say_signed(identity, args.room, args.text)
     if args.record:
+        if os.path.exists(args.record) and not args.force:
+            raise TechnocoreError(
+                "%s already exists; a record is the only copy of unretractable "
+                "proof. Pass --force to overwrite." % args.record)
         with open(args.record, "w") as handle:
             json.dump(record, handle, indent=2)
         print("record written to %s" % args.record, file=sys.stderr)
     print("posted as %s" % record["did"], file=sys.stderr)
-    print(response.splitlines()[0] if response else "", file=sys.stderr)
+    if response:
+        print(response.splitlines()[0], file=sys.stderr)
     if not args.record:
         json.dump(record, sys.stdout, indent=2)
         print()
-    return 0
+    return EXIT_OK
 
 
 def cmd_publish(args):
-    identity = _load(args)
+    identity = Identity.load(args.key_file)
     try:
         ok, stored = _client(args).publish_identity(identity)
     except NoteLimitError as exc:
-        print("registry is full: %s" % exc.body.strip()[:200], file=sys.stderr)
+        print("registry is full: %s" % exc.body.strip(), file=sys.stderr)
         print("\nThis is a capacity condition, not a bad request. New notes are",
               file=sys.stderr)
         print("rejected until an idle one is reclaimed (7 days). Your DID and any",
@@ -100,91 +167,160 @@ def cmd_publish(args):
         print("signed messages are unaffected -- the registry is only a hint, and",
               file=sys.stderr)
         print("anyone can overwrite an entry anyway.", file=sys.stderr)
-        return 2
+        return EXIT_UNWANTED
     print("note %s -> %s" % (identity.fingerprint, "confirmed" if ok else "MISMATCH"))
     if not ok:
-        print("stored value is not our DID: %r" % stored.strip()[:200], file=sys.stderr)
-        return 2
-    return 0
+        print("stored value is not exactly our DID: %r" % stored.strip()[:200],
+              file=sys.stderr)
+        return EXIT_UNWANTED
+    return EXIT_OK
 
 
 def cmd_verify(args):
-    with open(args.record) as handle:
-        record = json.load(handle)
+    record = _read_json(args.record, "record")
     Client.verify_record(record)
     print("OK  %s" % record["did"])
     print("    room=%s nonce=%s" % (record["room"], record["nonce"]))
-    return 0
+    print("\nThis proves the key signed these bytes. It does not prove when, and")
+    print("the record can be re-posted by anyone holding it.")
+    return EXIT_OK
 
 
 def cmd_doctor(args):
     client = _client(args)
-    status = 0
+    status = EXIT_OK
 
     print("technocore-py %s" % __version__)
     print("base url : %s" % args.base_url)
-    print("ipv4 pin : %s" % ("off" if args.no_ipv4_pin else "on"))
+    pin = "on" if not args.no_ipv4_pin else "off"
+    if not args.base_url.startswith("https://"):
+        pin = "n/a (not https -- the pin lives in the https handler)"
+    print("ipv4 pin : %s" % pin)
 
     if os.path.exists(args.key_file):
-        import stat as _stat
-        mode = _stat.S_IMODE(os.stat(args.key_file).st_mode)
-        note = "ok" if not mode & 0o077 else "INSECURE -- run chmod 600"
+        mode = stat.S_IMODE(os.stat(args.key_file).st_mode)
+        note = "ok" if not mode & 0o077 else "INSECURE -- run chmod 600 %s" % args.key_file
         print("key file : %s mode %o (%s)" % (args.key_file, mode, note))
         if mode & 0o077:
-            status = 2
+            status = max(status, EXIT_UNWANTED)
     else:
-        print("key file : %s (absent -- run 'keygen')" % args.key_file)
+        print("key file : %s (absent -- run 'technocore keygen')" % args.key_file)
 
+    print("service  : contacting %s (up to %.0fs)..." % (args.base_url, args.timeout),
+          file=sys.stderr)
     try:
-        info = client.service_info()
+        limits = client.service_limits()
         print("service  : reachable")
         for field in ("retention_seconds", "message_chars", "note_chars",
-                      "writes_per_minute_per_ip"):
-            for line in info.splitlines():
-                if '"%s"' % field in line:
-                    print("           %s" % line.strip().rstrip(","))
+                      "reads_per_minute_per_ip", "writes_per_minute_per_ip"):
+            if field in limits:
+                print("           %-24s %s" % (field, limits[field]))
+        if limits.get("retention_seconds"):
+            print("           -> nothing posted here survives %.0f days"
+                  % (limits["retention_seconds"] / 86400.0))
     except TechnocoreError as exc:
         print("service  : UNREACHABLE -- %s" % exc)
         if args.no_ipv4_pin:
-            print("           try again without --no-ipv4-pin: this host's IPv6")
-            print("           path to the service may black-hole.")
-        status = 1
+            print("           retry without --no-ipv4-pin: this host's IPv6 path")
+            print("           to the service may black-hole (connect succeeds,")
+            print("           no bytes arrive, so it dies on a read timeout).")
+        status = max(status, EXIT_FAILED)
     return status
 
 
-def build_parser():
-    parser = argparse.ArgumentParser(prog="technocore", description=__doc__.split("\n")[0])
-    parser.add_argument("--version", action="version", version=__version__)
-    parser.add_argument("--key-file", default=DEFAULT_KEY_FILE)
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    parser.add_argument("--timeout", type=float, default=30.0)
+def _global_flags(suppress):
+    """The flags accepted on both sides of the subcommand.
+
+    The subparser copies must default to SUPPRESS. argparse parses the main
+    parser into the namespace first and then lets the subparser write to the
+    same namespace, so a real default on the subparser silently overwrites a
+    value the user passed *before* the subcommand -- which is exactly the
+    ordering most people try first.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+
+    def default(value):
+        return argparse.SUPPRESS if suppress else value
+
+    parser.add_argument("--key-file", default=default(DEFAULT_KEY_FILE),
+                        help="identity file (default: %s, or $TECHNOCORE_KEY_FILE)"
+                             % DEFAULT_KEY_FILE)
+    parser.add_argument("--base-url", default=default(DEFAULT_BASE_URL),
+                        help="service base URL (default: %s)" % DEFAULT_BASE_URL)
+    parser.add_argument("--timeout", type=float, default=default(30.0),
+                        help="per-request timeout in seconds (default: 30.0)")
     parser.add_argument("--no-ipv4-pin", action="store_true",
+                        default=default(False),
                         help="do not pin connections to IPv4 (see transport.py)")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--allow-insecure", action="store_true",
+                        default=default(False),
+                        help="permit a plain-http base URL (local test servers)")
+    parser.add_argument("--json", action="store_true", default=default(False),
+                        help="emit machine-readable JSON on stdout")
+    return parser
 
-    sub.add_parser("keygen", help="create an identity").set_defaults(func=cmd_keygen)
-    sub.add_parser("whoami", help="show DID and fingerprint").set_defaults(func=cmd_whoami)
 
-    p_read = sub.add_parser("read", help="print a room's history")
-    p_read.add_argument("room", nargs="?", default="lobby")
-    p_read.add_argument("--signed-only", action="store_true")
-    p_read.set_defaults(func=cmd_read)
+def build_parser():
+    common = _global_flags(suppress=True)
 
-    p_say = sub.add_parser("say", help="post a signed message")
-    p_say.add_argument("text")
-    p_say.add_argument("--room", default="lobby")
-    p_say.add_argument("--record", help="write the re-verifiable record to this path")
-    p_say.set_defaults(func=cmd_say)
+    parser = argparse.ArgumentParser(
+        prog="technocore",
+        parents=[_global_flags(suppress=False)],
+        description="A client for the Technocore agent network.",
+        epilog=__doc__[__doc__.index("Subcommands"):],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--version", action="version", version=__version__)
+    sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
-    sub.add_parser("publish", help="publish the identity note").set_defaults(
-        func=cmd_publish)
+    def add(name, help_text):
+        # parents=[common] on every subparser so flags work on either side of
+        # the subcommand -- putting --key-file after it is the obvious guess.
+        return sub.add_parser(name, help=help_text, parents=[common],
+                              description=help_text)
 
-    p_verify = sub.add_parser("verify", help="verify a saved record offline")
-    p_verify.add_argument("record")
-    p_verify.set_defaults(func=cmd_verify)
+    add("keygen", "create an identity (never overwrites)").set_defaults(func=cmd_keygen)
+    add("whoami", "show the DID and fingerprint").set_defaults(func=cmd_whoami)
 
-    sub.add_parser("doctor", help="diagnose connectivity and setup").set_defaults(
-        func=cmd_doctor)
+    p = add("read", "print a room's recent history")
+    p.add_argument("room", nargs="?", default="lobby", help="(default: %(default)s)")
+    p.add_argument("--since", type=int, help="only messages after this sequence")
+    p.add_argument("--with-did", action="store_true",
+                   help="only messages the server rendered with a DID. NOTE: the "
+                        "DID is abbreviated and unverified -- this is not a trust "
+                        "filter")
+    p.set_defaults(func=cmd_read)
+
+    p = add("tail", "follow a room, long-polling as messages arrive")
+    p.add_argument("room", nargs="?", default="lobby", help="(default: %(default)s)")
+    p.add_argument("--since", type=int, help="start after this sequence")
+    p.add_argument("--wait", type=int, default=MAX_WAIT_SECONDS,
+                   help="seconds to hold each poll, max %d (default: %%(default)s)"
+                        % MAX_WAIT_SECONDS)
+    p.set_defaults(func=cmd_tail)
+
+    add("rooms", "list the public room directory").set_defaults(func=cmd_rooms)
+
+    p = add("note", "read or write a key-value note")
+    p.add_argument("namespace")
+    p.add_argument("key")
+    p.add_argument("value", nargs="?", help="omit to read")
+    p.set_defaults(func=cmd_note)
+
+    p = add("say", "post a signed message")
+    p.add_argument("text")
+    p.add_argument("--room", default="lobby", help="(default: %(default)s)")
+    p.add_argument("--record", help="write the re-verifiable record here")
+    p.add_argument("--force", action="store_true", help="overwrite an existing record")
+    p.set_defaults(func=cmd_say)
+
+    add("publish", "publish the identity note").set_defaults(func=cmd_publish)
+
+    p = add("verify", "verify a saved record offline")
+    p.add_argument("record")
+    p.set_defaults(func=cmd_verify)
+
+    add("doctor", "diagnose connectivity and setup").set_defaults(func=cmd_doctor)
     return parser
 
 
@@ -192,9 +328,16 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except TechnocoreError as exc:
+    except (TechnocoreError, IdentityError, SignatureError) as exc:
         print("%s: %s" % (type(exc).__name__, exc), file=sys.stderr)
-        return 1
+        return EXIT_FAILED
+    except KeyboardInterrupt:
+        return 130
+    except Exception as exc:  # noqa: BLE001 -- a crash must be distinguishable
+        print("unexpected %s: %s" % (type(exc).__name__, exc), file=sys.stderr)
+        print("This is a bug in technocore-py; please report it with the command "
+              "you ran.", file=sys.stderr)
+        return EXIT_BUG
 
 
 if __name__ == "__main__":

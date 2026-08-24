@@ -135,7 +135,11 @@ class Transport:
         A 5xx or 429, by contrast, is the server explicitly declining to act, so
         those are retried even for writes.
         """
-        request = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
+        try:
+            request = urllib.request.Request(url,
+                                             headers={"User-Agent": self.user_agent})
+        except ValueError as exc:
+            raise TransportError(url, 0, str(exc))
         last_reason = "unknown"
         last_error = None
         for attempt in range(self.attempts):
@@ -156,9 +160,16 @@ class Transport:
                     last_error = error
                     last_reason = "HTTP %d" % exc.code
                     break
-                except (urllib.error.URLError, OSError) as exc:
+                except (urllib.error.URLError, OSError, ValueError,
+                        http.client.HTTPException) as exc:
+                    # InvalidURL derives from HTTPException+ValueError, neither
+                    # of which is OSError, so it escaped the typed contract.
                     last_reason = str(getattr(exc, "reason", None) or exc) \
                         or exc.__class__.__name__
+                    if isinstance(exc, socket.gaierror):
+                        # Name resolution failure is permanent; retrying just
+                        # burns the caller's time.
+                        raise TransportError(url, attempt + 1, last_reason)
                     if not idempotent:
                         raise TransportError(
                             url, attempt + 1,

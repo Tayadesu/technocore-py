@@ -1,21 +1,26 @@
 """High-level Technocore client: rooms, notes, and signed records."""
 
+import json
 import re
 import time
 import urllib.parse
 
-from .errors import SignatureError, TooLargeError
+from ._version import __version__
+from .errors import SignatureError, TechnocoreError, TooLargeError
 from .identity import verify
 from .transport import Transport
 
-__all__ = ["Client", "Message", "DEFAULT_BASE_URL"]
+__all__ = ["Client", "Message", "RoomHistory", "parse_room",
+           "DEFAULT_BASE_URL", "MAX_MESSAGE_CHARS", "MAX_NOTE_CHARS"]
 
 DEFAULT_BASE_URL = "https://technocore.chat"
-USER_AGENT = "technocore-py/0.1.0 (+https://github.com/technocore-py)"
+USER_AGENT = "technocore-py/%s (+https://pypi.org/project/technocore-chat/)" % __version__
 
 # Server-advertised caps, from /.well-known/agent.json.
 MAX_MESSAGE_CHARS = 4096
 MAX_NOTE_CHARS = 8192
+# /.well-known/agent.json: "wait_for_message ... up to 10s"
+MAX_WAIT_SECONDS = 10
 
 # "[9656] 2026-08-24T20:39:10.945213Z <z6Mk...Khfd> body text"
 # seq is bounded: CPython caps int() at 4300 digits, so an unbounded \d+ from
@@ -87,7 +92,23 @@ class Client:
     """
 
     def __init__(self, base_url=DEFAULT_BASE_URL, transport=None, user_agent=USER_AGENT,
-                 timeout=30.0, attempts=3, prefer_ipv4=True):
+                 timeout=30.0, attempts=3, prefer_ipv4=True, allow_insecure=False):
+        if not isinstance(base_url, str):
+            raise TechnocoreError("base_url must be a string, got %s"
+                                  % type(base_url).__name__)
+        scheme = urllib.parse.urlparse(base_url).scheme
+        if scheme not in ("http", "https"):
+            raise TechnocoreError(
+                "base_url must start with https:// -- got %r. Did you mean %r?"
+                % (base_url[:60], DEFAULT_BASE_URL))
+        if scheme == "http" and not allow_insecure:
+            # Signed records travel in the URL path; over cleartext they land in
+            # every intermediary's logs. Also, the IPv4 pin lives in the https
+            # handler only, so http silently loses it too.
+            raise TechnocoreError(
+                "refusing a plain-http base_url: signed records would travel in "
+                "cleartext and the IPv4 pin would not apply. "
+                "Pass allow_insecure=True for a local test server.")
         self.base_url = base_url.rstrip("/")
         self.transport = transport or Transport(
             user_agent=user_agent, timeout=timeout, attempts=attempts,
@@ -102,23 +123,75 @@ class Client:
 
     # -- reading ---------------------------------------------------------
 
-    def read(self, room):
+    def read(self, room, since=None, wait=None):
         """Return the room's recent history.
 
-        The server decides the window size; there is no reliable way to ask for
-        older messages, so treat anything you need later as ephemeral and keep
-        your own copy. Retention is 7 days.
+        ``since`` returns only messages after that sequence number -- pass the
+        previous call's :attr:`RoomHistory.latest_seq`. A sequence that has
+        already aged out of the window yields the full window instead, so it
+        narrows traffic rather than guaranteeing continuity.
+
+        ``wait`` long-polls: the server holds the request until a message lands,
+        up to 10 seconds. The service asks callers to prefer ``wait`` over tight
+        polling, and notes a bare re-fetch often returns cached bytes.
+
+        Retention is 7 days and the window is a ring buffer, so treat anything
+        you need later as ephemeral and keep your own copy.
         """
-        body = self.transport.get(self._url("r", room))
-        return parse_room(body)
+        query = {}
+        if since is not None:
+            query["since"] = _as_index(since, "since")
+        if wait is not None:
+            wait = _as_index(wait, "wait")
+            if wait > MAX_WAIT_SECONDS:
+                raise TechnocoreError("wait is %ds; the service caps it at %d"
+                                      % (wait, MAX_WAIT_SECONDS))
+            query["wait"] = wait
+        url = self._url("r", room)
+        if query:
+            url += "?" + urllib.parse.urlencode(query)
+        return parse_room(self.transport.get(url))
+
+    def follow(self, room, since=None, wait=MAX_WAIT_SECONDS):
+        """Yield messages as they arrive, long-polling from ``since`` onward.
+
+        Runs until the caller stops consuming. Transport errors propagate --
+        deciding whether a stall is worth retrying belongs to the caller, not
+        to a generator that would otherwise hide an outage as silence.
+        """
+        cursor = since
+        while True:
+            history = self.read(room, since=cursor, wait=wait)
+            for message in history:
+                if cursor is None or message.seq > cursor:
+                    yield message
+            if history.latest_seq is not None:
+                cursor = history.latest_seq
+            elif history:
+                cursor = max(m.seq for m in history)
 
     def rooms(self):
         """Raw text of the public room directory."""
         return self.transport.get("%s/rooms" % self.base_url)
 
     def service_info(self):
-        """The ``/.well-known/agent.json`` document, as text."""
-        return self.transport.get("%s/.well-known/agent.json" % self.base_url)
+        """The ``/.well-known/agent.json`` document, parsed."""
+        body = self.transport.get("%s/.well-known/agent.json" % self.base_url)
+        try:
+            return json.loads(body)
+        except ValueError as exc:
+            raise TechnocoreError("%s/.well-known/agent.json is not valid JSON: %s"
+                                  % (self.base_url, exc))
+
+    def service_limits(self):
+        """The ``limits`` block: retention, per-IP rates, and size caps.
+
+        Values here are what the instance actually enforces, and they are worth
+        reading rather than assuming -- notably ``retention_seconds`` (604800),
+        which is why nothing posted to a room is durable.
+        """
+        limits = self.service_info().get("limits", {})
+        return {k: v for k, v in limits.items() if isinstance(v, (int, float))}
 
     # -- writing ---------------------------------------------------------
 
@@ -215,6 +288,8 @@ class Client:
                           record["nonce"], record["text"])
         except KeyError as exc:
             raise SignatureError("record is missing field %s" % exc)
+        except (TypeError, AttributeError) as exc:
+            raise SignatureError("record is not a well-formed mapping: %s" % exc)
 
 
 def parse_room(body):
@@ -258,6 +333,17 @@ def parse_room(body):
 
 def _opt_int(value):
     return None if value in (None, "None") else int(value)
+
+
+def _as_index(value, label):
+    """Coerce a sequence/duration argument, refusing anything nonsensical."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise TechnocoreError("%s must be an integer, got %r" % (label, value))
+    if number < 0:
+        raise TechnocoreError("%s must not be negative, got %d" % (label, number))
+    return number
 
 
 def _check_len(value, cap, label):

@@ -28,7 +28,7 @@ from .errors import (
 from .identity import Identity, canonical_message, did_to_public_key, fingerprint, verify
 from .transport import Transport
 
-__version__ = "0.1.0"
+from ._version import __version__
 
 __all__ = [
     "Client",

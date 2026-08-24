@@ -179,9 +179,15 @@ class Identity:
 
     @classmethod
     def load(cls, path, require_secure_mode=True):
-        if not os.path.exists(path):
-            raise IdentityError("no identity file at %s" % path)
-        mode = stat.S_IMODE(os.stat(path).st_mode)
+        try:
+            info = os.stat(path)
+        except OSError as exc:
+            raise IdentityError("cannot read identity at %s: %s -- run: "
+                                "technocore keygen --key-file %s"
+                                % (path, exc.strerror or exc, path))
+        if not stat.S_ISREG(info.st_mode):
+            raise IdentityError("%s is not a regular file" % path)
+        mode = stat.S_IMODE(info.st_mode)
         if require_secure_mode and mode & 0o077:
             raise IdentityError(
                 "%s is mode %o -- group/other can read the secret. "
@@ -233,24 +239,43 @@ class Identity:
             serialization.NoEncryption(),
         )
         parent = os.path.dirname(os.path.abspath(path))
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        # O_EXCL so a concurrent run cannot overwrite an identity, and 0600 at
-        # creation so the secret is never briefly world-readable.
         try:
+            if parent:
+                # 0700: the file itself is 0600, but a world-writable parent
+                # lets a local user swap in their own identity, and everything
+                # this agent then "signs" is forgeable by them.
+                os.makedirs(parent, mode=0o700, exist_ok=True)
+            # O_EXCL so a concurrent run cannot overwrite an identity, and 0600
+            # at creation so the secret is never briefly world-readable.
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
             raise IdentityError("refusing to overwrite existing identity at %s" % path)
-        with os.fdopen(fd, "w") as handle:
-            json.dump(
-                {
-                    "did": self.did,
-                    "private_key_hex": raw_priv.hex(),
-                    "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                },
-                handle,
-                indent=2,
-            )
+        except OSError as exc:
+            raise IdentityError("cannot create identity at %s: %s"
+                                % (path, exc.strerror or exc))
+        try:
+            with os.fdopen(fd, "w") as handle:
+                json.dump(
+                    {
+                        "did": self.did,
+                        "private_key_hex": raw_priv.hex(),
+                        "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                     time.gmtime()),
+                    },
+                    handle,
+                    indent=2,
+                )
+                # The README calls this file unrecoverable; make sure it is
+                # actually on disk before we tell the user it was saved.
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise IdentityError("cannot write identity to %s: %s"
+                                % (path, exc.strerror or exc))
+        finally:
+            # Best effort: keep the secret out of any traceback that captures
+            # frame locals (Sentry, rich, pytest --showlocals all do).
+            del raw_priv
         return path
 
     # -- use -------------------------------------------------------------
