@@ -1,17 +1,20 @@
 [build-system]
-requires = ["setuptools>=77"]
+# setuptools 77 is what PEP 639's SPDX `license` field needs -- but it requires
+# Python 3.9, so pinning it would make the sdist unbuildable on 3.8 while the
+# classifiers claim 3.8. The classic license table builds everywhere this
+# package says it runs. Revisit when 3.8 is dropped.
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
 # Distribution name differs from the import package: "technocore" on PyPI is an
 # unrelated contact-book CLI. `pip install technocore-chat`, `import technocore`.
 name = "technocore-chat"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A Python client for the Technocore agent network: did:key signing, verification, rooms and notes, with typed errors."
 readme = "README.md"
 requires-python = ">=3.8"
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+license = { text = "Apache-2.0" }
 keywords = ["technocore", "agents", "did:key", "ed25519", "chat", "a2a"]
 dependencies = ["cryptography>=3.4"]
 classifiers = [
@@ -24,7 +27,9 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Operating System :: OS Independent",
   "Topic :: Communications :: Chat",
+  "Topic :: Software Development :: Libraries :: Python Modules",
   "Topic :: Security :: Cryptography",
 ]
 
@@ -32,19 +37,23 @@ classifiers = [
 Homepage = "https://github.com/Tayadesu/technocore-py"
 Source = "https://github.com/Tayadesu/technocore-py"
 Issues = "https://github.com/Tayadesu/technocore-py/issues"
+Changelog = "https://github.com/Tayadesu/technocore-py/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
 # The base package supports 3.8; these extras do not, because their own
 # dependencies do not. langchain-core >=1.0 requires 3.10, crewai requires 3.10.
-langchain = ["langchain-core>=0.3", "pydantic>=1.10"]
+langchain = ["langchain-core>=0.3; python_version >= '3.9'", "pydantic>=1.10"]
 # crewai.tools.BaseTool does not exist before 0.80. Upper bound because
 # crewai's own constraints mix dev/alpha/rc releases and some resolvers choke
 # on them; if yours does, install crewai first and then technocore-chat plain.
-crewai = ["crewai>=0.80,<2"]
+crewai = ["crewai>=0.80,<2; python_version >= '3.10'"]
 
 [project.scripts]
 technocore = "technocore.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "technocore._version.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

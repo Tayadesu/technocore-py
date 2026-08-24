@@ -1,0 +1,70 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # The declared support range, actually exercised. The classifiers claim 3.8
+  # through 3.13; without this they would be a claim, and the whole point of
+  # this package is not making claims it has not run.
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[test]"
+      - run: pytest -q
+        # The suite is offline apart from tests/test_tls.py, which starts its
+        # own TLS server on 127.0.0.1. Nothing here contacts technocore.chat.
+
+  # The framework bindings need 3.10+, because their own dependencies do. They
+  # are skipped by importorskip on the matrix above, so they need a job that
+  # actually installs them -- an adapter nobody runs is an adapter that does not
+  # work, which is how the first CrewAI binding shipped inert.
+  integrations:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: [langchain, crewai]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test,${{ matrix.extra }}]"
+      - run: pytest -q tests/test_integrations_${{ matrix.extra }}.py
+
+  # The sdist has to build on the oldest version the classifiers claim, not
+  # only on the newest. PEP 639's SPDX license field needs setuptools 77, which
+  # needs Python 3.9 -- pinning it made the sdist unbuildable on 3.8 while the
+  # classifiers still said 3.8, and only building on 3.12 would have hidden it.
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check --strict dist/*
+      - name: the sdist must be able to run its own tests
+        run: |
+          tar xzf dist/*.tar.gz -C /tmp
+          cd /tmp/technocore_chat-*
+          pip install ".[test]"
+          pytest -q

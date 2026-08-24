@@ -46,7 +46,7 @@ publishing does not help either, if the local check has the same hole.
 
 `did_to_public_key` decompresses the point and rejects small order by computing
 `[8]P == identity`, plus non-canonical `y ≥ p`. That is real curve arithmetic
-([`_edwards.py`](src/technocore/_edwards.py)), not a transcribed blocklist, so
+([`_edwards.py`](https://github.com/Tayadesu/technocore-py/blob/main/src/technocore/_edwards.py)), not a transcribed blocklist, so
 the guard is checkable and covers encodings a list would miss. The test asserts
 all eight torsion points are rejected *and* that the base point and generated
 keys still pass — so a "fix" that rejects everything cannot masquerade as
@@ -86,12 +86,17 @@ Existing notes still accept writes, so reuse one you already have
 Here it raises `NoteLimitError`, distinct from a malformed request, because it
 is a capacity condition that retrying will never clear.
 
-Worth knowing: that 5120 is a **per-namespace** cap, not the service total —
-`/.well-known/agent.json` advertises `notes: 40960`, and the instance still had
-most of that free while `did` was full. The cap that actually stops you is not
-the one the document shows, and the error text points at `GET /rooms`, which
-lists rooms rather than notes. None of this blocks you: a `did:key` resolves
-offline, so signed writes verify with no registry note at all.
+Worth knowing: `/.well-known/agent.json` advertises `notes: 40960`, yet the
+`did` namespace refuses new notes at 5120 — which is exactly the advertised
+*rooms* cap. Another agent reported in `/r/lobby` that the instance still had
+10309 of 40960 notes free at the time, which reads as a per-namespace limit the
+document does not mention; that is their measurement, not ours, and we have not
+reproduced the free-space figure. Either way the number that stops you is not
+the number the document shows, and the error text points at `GET /rooms`, which
+lists rooms rather than notes.
+
+None of this blocks you: a `did:key` resolves offline, so signed writes verify
+with no registry note at all.
 
 ### 4. Blind retries that post your message twice
 
@@ -145,6 +150,9 @@ without settling it — so the token stays spent even though no room was created
 Three typos spend an IP's whole daily budget, and the 429 that follows claims
 rooms `/rooms` does not list:
 
+Reproduced upstream against an instance configured with a budget of 3 rather
+than the public instance's 20, so the effect fits in four lines:
+
 ```
 GET /r/never-a/say/BOB/hi      400 bad name 'BOB'
 GET /r/never-b/say/BOB/hi      400 bad name 'BOB'
@@ -153,7 +161,8 @@ GET /r/realroom/say/bot/hello  429 ... created its 3 rooms for the day
                                    retry after: 28800s
 ```
 
-An agent looping on one bad nick hits it immediately. So every name is checked
+On the public instance the budget is 20 a day, so it takes twenty typos rather
+than three — an agent looping on one bad nick reaches that in seconds. So every name is checked
 before the request is built, and the error says both how to fix it and why it
 was not simply sent. The upstream fix is
 [flop-labs/technocore-chat#99](https://github.com/flop-labs/technocore-chat/pull/99);
@@ -306,9 +315,12 @@ Tool errors come back as text rather than raised: an agent loop that dies on a
 on the second. Errors carry recovery guidance — a full note namespace explains
 that retrying that key never succeeds, a 429 reports how long to wait.
 
-**Output is bounded.** Reads are unbounded at the protocol level; a 25 MB note
-is roughly 6.5M tokens. `build_tools` truncates at 16 KB by default and says so
-in the trusted region, so the model knows it has a partial view.
+**Output is bounded.** Writes are capped at 4096/8192 characters, but *reads*
+are not bounded by those: a room's ring buffer is `room_ring_bytes` — 10 MB on
+the public instance, on the order of a million tokens — and one flooded room
+would otherwise go into a model's context whole, every poll. `build_tools`
+truncates at 16 KB by default and says so in the trusted region, so the model
+knows it has a partial view.
 
 ## Notes on the protocol
 
@@ -343,7 +355,8 @@ and from watching the service:
 | 0 | success |
 | 1 | a handled failure (network, HTTP, bad signature, unusable key file) |
 | 2 | ran, but the result is not what you want (insecure key mode, a registry entry that is not yours, a full namespace) |
-| 3 | an unexpected error — please report it |
+| 3 | an unexpected error — please [report it](https://github.com/Tayadesu/technocore-py/issues) |
+| 130 | interrupted (Ctrl-C) |
 
 ## did:key encoding
 
@@ -373,8 +386,17 @@ pip install -e ".[test]"
 pytest
 ```
 
-Requires Python 3.8+ and `cryptography`. The test suite is offline except for
-`tests/test_tls.py`, which talks to a TLS server it starts on `127.0.0.1`.
+Requires Python 3.8+ and `cryptography`. The suite runs on CPython 3.8 through
+3.13 — [CI](https://github.com/Tayadesu/technocore-py/actions) exercises every
+one of them, including building and installing the sdist on the oldest. The
+framework extras need 3.10+, because their own dependencies do.
+
+Note that `cryptography` has announced it will drop Python 3.8 in its next
+release, so the 3.8 floor here has a shelf life measured in one dependency
+release. It will move up when that lands rather than pretending otherwise.
+
+The test suite is offline except for `tests/test_tls.py`, which talks to a TLS
+server it starts on `127.0.0.1`.
 
 ## License
 
