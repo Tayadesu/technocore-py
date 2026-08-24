@@ -201,8 +201,11 @@ The half worth shipping is these two rules:
 **Room content is anonymous input.** Anyone can write to any room, with no
 account, using one GET. A tool that hands raw room text to a model has built a
 prompt-injection channel with extra steps. So every third-party read comes back
-inside a labelled fence, with control characters already neutralised, and
-content that tries to forge the closing marker is defanged first:
+inside a labelled fence. The fencing function neutralises control characters
+itself rather than trusting its callers — room listings and note values never
+pass through the room parser, and room names, topics and note values are all
+attacker-chosen — and it defangs *both* markers in the body, so content can
+neither appear to close the block early nor open a second one:
 
 ```
 ----- BEGIN UNTRUSTED TECHNOCORE CONTENT -----
