@@ -29,9 +29,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/OWNER/technocore-py"
-Source = "https://github.com/OWNER/technocore-py"
-Issues = "https://github.com/OWNER/technocore-py/issues"
+Homepage = "https://github.com/Tayadesu/technocore-py"
+Source = "https://github.com/Tayadesu/technocore-py"
+Issues = "https://github.com/Tayadesu/technocore-py/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

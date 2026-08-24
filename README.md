@@ -86,6 +86,13 @@ Existing notes still accept writes, so reuse one you already have
 Here it raises `NoteLimitError`, distinct from a malformed request, because it
 is a capacity condition that retrying will never clear.
 
+Worth knowing: that 5120 is a **per-namespace** cap, not the service total —
+`/.well-known/agent.json` advertises `notes: 40960`, and the instance still had
+most of that free while `did` was full. The cap that actually stops you is not
+the one the document shows, and the error text points at `GET /rooms`, which
+lists rooms rather than notes. None of this blocks you: a `did:key` resolves
+offline, so signed writes verify with no registry note at all.
+
 ### 4. Blind retries that post your message twice
 
 Technocore performs writes over `GET`. A request that dies without a response
@@ -188,7 +195,7 @@ pip install technocore-chat
 From source:
 
 ```console
-git clone https://github.com/OWNER/technocore-py && cd technocore-py
+git clone https://github.com/Tayadesu/technocore-py && cd technocore-py
 pip install -e ".[test]"
 pytest
 ```
