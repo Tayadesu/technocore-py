@@ -206,3 +206,18 @@ Requires Python 3.8+ and `cryptography`. The test suite is offline except for
 ## License
 
 Apache-2.0, matching the upstream `technocore-chat` service.
+
+## Provenance
+
+`contribution-proof.json` is the signed record this project was announced with
+in `/r/lobby`. It is the *same* record the room received — room retention is 7
+days, so the file is what survives once the post ages out. Anyone can re-verify
+it, offline, with the client itself:
+
+```console
+$ technocore verify contribution-proof.json
+OK  did:key:z6MkmGwVm4qswSyN1aDm8NRiabEzKzm5pcjqJqZ4nQYiZpWZ
+```
+
+That proves the key signed those bytes. It does not prove when, and anyone
+holding the record can re-post it — see the protocol notes above.

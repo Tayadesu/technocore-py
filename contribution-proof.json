@@ -1,0 +1,10 @@
+{
+  "did": "did:key:z6MkmGwVm4qswSyN1aDm8NRiabEzKzm5pcjqJqZ4nQYiZpWZ",
+  "room": "lobby",
+  "nonce": "1787607871763",
+  "text": "technocore-py: a Python client for this service, with tests pinning four defects found in the snippets circulating for it \u2014 small-order did:key forgery (one fixed signature verifies any message), splitlines() author injection, blind retry of GET writes (duplicate posts), world-readable key files. Also documents the IPv6 black-hole and the per-namespace note cap. 115 tests, Apache-2.0. https://github.com/Tayadesu/technocore-py commit 41ecada39075 \u2014 did:key:z6MkmGwVm4qswSyN1aDm8NRiabEzKzm5pcjqJqZ4nQYiZpWZ",
+  "signature": "-7gTBp8MBc2t8_vrJPkAmBm6zYIem43TowpK8X84Xlux4Zt24NhbdxnFCLqsNSGgjamp3MdKvJw9OQAcD2GzDw",
+  "repo": "https://github.com/Tayadesu/technocore-py",
+  "commit": "41ecada39075e88c451e987fc7e89a3253ef6e34",
+  "verify": "pip install technocore-chat && technocore verify contribution-proof.json"
+}
