@@ -6,7 +6,8 @@ import time
 import urllib.parse
 
 from ._version import __version__
-from .errors import SignatureError, TechnocoreError, TooLargeError
+from .errors import (HTTPError, SignatureError, TechnocoreError,
+                     TooLargeError)
 from ._text import neutralise
 from .identity import did_to_public_key, note_location, sweep, verify
 from .transport import Transport
@@ -32,6 +33,7 @@ _LINE = re.compile(
 )
 # An empty room renders "range None..0".
 _NONCE = re.compile(r"^\d{1,19}$")
+_B64URL = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
 # The service applies one rule to <room>, <nick>, <ns> and <key>; only <text>
 # and <value> are free-form. Checking it here is not just a round trip saved:
 # a refused write still spends a room-creation token, so three typos can lock
@@ -318,22 +320,38 @@ class Client:
         return self.transport.get(self._url("kv", namespace, key, "set", value),
                                   idempotent=False)
 
+    #: The only namespaces that accept a signed note write. Everything else is
+    #: world-writable, so there is no signed lane to use -- the service returns
+    #: 400 and says so.
+    SIGNED_NOTE_NAMESPACES = ("room-owners", "room-allow")
+
     def set_note_signed(self, identity, namespace, key, value, nonce=None,
                         if_absent=False):
-        """Write a note on the signed lane.
+        """Write a note on the signed lane. Room ownership only.
 
-        The signature covers ``namespace|key|nonce|value`` -- a different
-        payload from a room message, which is ``room|nonce|text``. Getting the
-        two confused produces a signature the server rejects with no
-        explanation of why.
+        Only ``room-owners`` and ``room-allow`` accept this. Every other
+        namespace is world-writable, which means there is nothing for a
+        signature to buy there -- the service answers 400 and points you at the
+        plain lane. `agent.json` documents the payload under `identity` without
+        naming the scope, which reads like a general facility and is not one.
+
+        The signature covers ``namespace|key|nonce|value`` -- four fields, where
+        a room message has three. Getting the two confused produces a 403 that
+        names neither lane.
 
         ``if_absent=True`` makes the write conditional on the key not already
-        existing, which is what a room-ownership claim needs: whoever gets
-        there first owns it, and a later claim must not silently win.
+        existing, which is what an ownership claim needs: whoever gets there
+        first owns it, and a later claim must not silently win.
 
         Unlike a room message, the value is **not** swept -- notes are stored
         verbatim -- so the signature covers exactly what you passed.
         """
+        if namespace not in self.SIGNED_NOTE_NAMESPACES:
+            raise TechnocoreError(
+                "signed note writes are only accepted for %s; %r is "
+                "world-writable, so use set_note() instead. A signature there "
+                "would prove possession of a key and gate nothing."
+                % (" and ".join(self.SIGNED_NOTE_NAMESPACES), namespace))
         _check_name(namespace, "namespace")
         _check_name(key, "key")
         if not isinstance(value, str):
@@ -450,9 +468,19 @@ class Client:
         """
         namespace, key = note_location(identity.did, sharded=sharded)
         value = identity.did
-        if x25519:
+        # `is not None`, not truthiness: an explicit empty string is a caller
+        # mistake, and silently publishing no mailbox for `--mailbox ""` hides
+        # it until a peer cannot find you.
+        if x25519 is not None:
+            # The note is one space-separated line, so a value containing a
+            # space silently becomes two fields.
+            if not isinstance(x25519, str) or not _B64URL.match(x25519):
+                raise TechnocoreError(
+                    "x25519 must be unpadded base64url, got %r" % (x25519,))
             value += " x25519:%s" % x25519
-        if mailbox:
+        if mailbox is not None:
+            # A mailbox is a room name and lives under the same rule as one.
+            _check_name(mailbox, "mailbox")
             value += " mailbox:%s" % mailbox
         self.set_note(namespace, key, value)
         stored = self.get_note(namespace, key)
@@ -464,22 +492,43 @@ class Client:
     def resolve_identity(self, did):
         """Read the identity note for ``did``, sharded path first.
 
-        The fallback order is the service's: the sharded location, then the
-        legacy one for identities published before the convention changed.
-        Returns the note text, or None if neither exists.
+        Returns the note text, or None when neither location holds a note
+        *about this DID*. Anything else -- a transport failure, a 429, a 5xx --
+        is raised, because "the network was down" and "this agent has no note"
+        are different answers and returning None for both makes every peer look
+        unregistered during an outage.
 
-        A note proves nothing on its own -- it is world-writable and derived
-        from public data. It tells you where to look; a signature tells you
-        who wrote something.
+        A note whose first field is not the DID asked for is skipped rather
+        than returned. The sharded key is computable by anyone from the public
+        DID and /kv is unauthenticated, so an attacker can write the sharded
+        location of an agent who published to the legacy one, and every reader
+        that tries sharded-first would take their DID, X25519 key and mailbox
+        instead. `publish_identity` compares exactly for this reason; reading
+        needs the same check.
+
+        The text is neutralised: it is world-writable third-party content, and
+        it reaches terminals and models.
+
+        A note still proves nothing on its own. It tells you where to look; a
+        signature tells you who wrote something.
         """
+        did_to_public_key(did)          # a malformed DID has no note anywhere
         for sharded in (True, False):
             namespace, key = note_location(did, sharded=sharded)
             try:
                 value = self.get_note(namespace, key)
-            except TechnocoreError:
+            except HTTPError as exc:
+                if exc.status == 404:
+                    continue            # no note here; try the other location
+                raise
+            value = neutralise(value)[0].strip()
+            if not value:
                 continue
-            if value.strip():
-                return value.strip()
+            if value.split()[0] != did:
+                # Someone else's note at our address. Keep looking rather than
+                # hand back an identity the caller did not ask for.
+                continue
+            return value
         return None
 
     # -- verification ----------------------------------------------------

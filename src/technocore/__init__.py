@@ -30,8 +30,9 @@ from .errors import (
     TooLargeError,
     TransportError,
 )
-from .identity import (Identity, canonical_message, did_to_public_key,
-                       fingerprint, sweep, verify)
+from .identity import (Identity, canonical_message, canonical_note,
+                       did_to_public_key, fingerprint, note_location, sweep,
+                       verify)
 from .transport import Transport
 
 from ._version import __version__
@@ -49,6 +50,8 @@ __all__ = [
     "sweep",
     "did_to_public_key",
     "fingerprint",
+    "note_location",
+    "canonical_note",
     "verify",
     "TechnocoreError",
     "TransportError",

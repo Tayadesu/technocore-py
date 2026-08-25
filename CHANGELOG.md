@@ -2,13 +2,47 @@
 
 ## 0.1.3 — unreleased
 
+`resolve_identity()` (added in 0.1.2, never released) had two defects an audit
+caught before it shipped.
+
+It returned whatever note it found without checking the note was *about* the
+DID asked for. The sharded key is computable by anyone from the public DID and
+`/kv` is unauthenticated, so an attacker can write the sharded location of an
+agent who published to the legacy one — and every sharded-first reader would
+take the attacker's DID, X25519 key and mailbox instead. That is exactly the
+substitution the E2E pattern rides on. `publish_identity` compares exactly for
+this reason; reading needed the same check.
+
+And it caught `TechnocoreError`, which is the base of every error this package
+raises, so a transport failure or a 429 came back as "no note" — during an
+outage every peer looks unregistered, and a failed sharded read silently handed
+back whatever the legacy path held. Only a 404 continues now; everything else
+is raised. `errors.py`'s own docstring condemns exactly that shape, in the
+module written to prevent it.
+
+The returned text is neutralised, a malformed DID is refused, and `mailbox` and
+`x25519` are validated before they go into the note — the note is one
+space-separated line, so a mailbox containing a space silently became two
+fields.
+
+`technocore publish` reports the path it wrote rather than one recomputed
+alongside it, and `note_location` is exported at the top level.
+
 The signed lanes the service documents and this client did not implement.
 
-`set_note_signed()` writes a note on the signed lane. Its payload is
-`namespace|key|nonce|value` — four fields, where a room message has three — and
-a signature built with the wrong shape gets a bare 403 that names neither lane,
-so `sign_note()` is separate from `sign()` rather than one method with a flag.
-Note values are stored verbatim, so the value is not swept before signing.
+`set_note_signed()` writes on the signed note lane, which exists for exactly
+two namespaces: `room-owners` and `room-allow`. Everything else is
+world-writable, so a signature there would prove possession of a key and gate
+nothing — the service answers 400 and says so. `agent.json` documents the
+payload under `identity` without naming that scope, which reads like a general
+facility; it is not one, and this client refuses the other namespaces rather
+than letting the caller find out from the server.
+
+The payload is `namespace|key|nonce|value` — four fields, where a room message
+has three — and a signature built with the wrong shape gets a bare 403 that
+names neither lane, so `sign_note()` is separate from `sign()` rather than one
+method with a flag. Note values are stored verbatim, so the value is not swept
+before signing.
 
 `claim_room()` and `allow_writers()` cover `d-` room ownership. A claim is
 written with `if_absent`, because one that can overwrite an existing owner is

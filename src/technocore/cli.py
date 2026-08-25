@@ -187,7 +187,6 @@ def cmd_publish(args):
     from .identity import note_location
 
     identity = Identity.load(args.key_file)
-    namespace, key = note_location(identity.did, sharded=not args.legacy)
     try:
         ok, stored = _client(args).publish_identity(
             identity, sharded=not args.legacy, mailbox=args.mailbox)
@@ -201,10 +200,14 @@ def cmd_publish(args):
               file=sys.stderr)
         print("anyone can overwrite an entry anyway.", file=sys.stderr)
         return EXIT_UNWANTED
+    # Asked from the same source the write used, not recomputed: a success
+    # line that derives the path independently can report one while the write
+    # went to the other.
+    namespace, key = note_location(identity.did, sharded=not args.legacy)
     print("note /kv/%s/%s -> %s"
           % (namespace, key, "confirmed" if ok else "MISMATCH"))
     if not ok:
-        print("stored value is not exactly our DID: %r" % stored.strip()[:200],
+        print("stored value is not exactly what we wrote: %r" % stored.strip()[:200],
               file=sys.stderr)
         return EXIT_UNWANTED
     return EXIT_OK

@@ -264,7 +264,7 @@ def test_publish_reports_an_entry_that_is_not_exactly_ours(spy, key, capsys):
     code, out, err = run(["--key-file", key, "publish"], capsys)
     assert code == EXIT_UNWANTED
     assert "MISMATCH" in out
-    assert "not exactly our DID" in err
+    assert "not exactly what we wrote" in err
 
 
 def test_publish_explains_a_full_namespace_rather_than_failing_bare(spy, key,
@@ -328,3 +328,29 @@ def test_tail_honours_an_explicit_since(spy, capsys, monkeypatch):
     run(["tail", "lobby", "--since", "2"], capsys)
     # No head read at all when the caller supplied the cursor.
     assert "since=2" in spy.urls[0], spy.urls
+
+
+def test_the_reported_path_is_the_path_that_was_written(spy, key, capsys):
+    # The success line derives the location independently of the write, so a
+    # mutation that made it always print the legacy path survived the whole
+    # suite: the line could report one location while the write went to the
+    # other, and nothing would notice.
+    import re
+
+    identity = Identity.load(key)
+    spy.note = identity.did
+    _code, out, _err = run(["--key-file", key, "publish"], capsys)
+    reported = re.search(r"note (/kv/\S+) ->", out).group(1)
+    assert reported in spy.writes[0], (
+        "reported %s but wrote %s" % (reported, spy.writes[0]))
+
+
+def test_the_reported_path_follows_legacy_too(spy, key, capsys):
+    import re
+
+    identity = Identity.load(key)
+    spy.note = identity.did
+    _code, out, _err = run(["--key-file", key, "publish", "--legacy"], capsys)
+    reported = re.search(r"note (/kv/\S+) ->", out).group(1)
+    assert reported in spy.writes[0]
+    assert reported == "/kv/did/%s" % identity.fingerprint

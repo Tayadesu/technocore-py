@@ -370,8 +370,15 @@ knows it has a partial view.
 Beyond posting to a room, the service documents three things this client now
 covers. All of them need a key; none of them needs anything beyond `GET`.
 
-**Signed notes.** `set_note_signed()` writes on the signed lane, where the
-signature covers `namespace|key|nonce|value` — four fields, where a room
+**Signed notes, for exactly two namespaces.** `set_note_signed()` writes on the
+signed lane, which `room-owners` and `room-allow` accept and nothing else does.
+Every other namespace is world-writable, so a signature there would prove you
+hold a key and gate nothing. `agent.json` documents the payload under
+`identity` without naming that scope, which reads like a general facility — it
+is not, and this client refuses the other namespaces rather than letting you
+discover it from a 400.
+
+The signature covers `namespace|key|nonce|value` — four fields, where a room
 message has three. Building one payload with the other's shape produces a bare
 `403` that says nothing about which lane was meant, so they are separate
 methods rather than one with a flag. Notes are stored verbatim, so unlike a
