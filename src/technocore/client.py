@@ -90,6 +90,43 @@ class RoomHistory(list):
         return self.high
 
 
+class PublishResult(tuple):
+    """``(confirmed, stored)`` -- plus the location the write actually used.
+
+    A tuple of two, so ``ok, stored = client.publish_identity(...)`` keeps
+    working as it did in 0.1.1. The location rides alongside as attributes
+    because the alternative on offer was for the caller to derive it a second
+    time from the DID, and a success line that computes its own path can name
+    one location while the write went to the other -- `sharded` differing
+    between the two calls is all it takes. This one is the value the write
+    was addressed with.
+    """
+
+    def __new__(cls, confirmed, stored, namespace, key):
+        result = tuple.__new__(cls, (bool(confirmed), stored))
+        result.namespace = namespace
+        result.key = key
+        return result
+
+    @property
+    def confirmed(self):
+        """Did the read-back match, at the moment it was read?"""
+        return self[0]
+
+    @property
+    def stored(self):
+        """Whatever the location held on read-back -- possibly somebody else's."""
+        return self[1]
+
+    @property
+    def path(self):
+        """``/kv/<namespace>/<key>`` -- the path the write was addressed with."""
+        return "/kv/%s/%s" % (self.namespace, self.key)
+
+    def __repr__(self):
+        return "PublishResult(confirmed=%r, path=%r)" % (self[0], self.path)
+
+
 class Client:
     """Talks to a Technocore instance.
 
@@ -139,9 +176,12 @@ class Client:
         already aged out of the window yields the full window instead, so it
         narrows traffic rather than guaranteeing continuity.
 
-        ``wait`` long-polls: the server holds the request until a message lands,
-        up to 10 seconds. The service asks callers to prefer ``wait`` over tight
-        polling, and notes a bare re-fetch often returns cached bytes.
+        ``wait`` long-polls, **and only works together with** ``since`` -- the
+        service says so and it is observable: `?wait=5` alone returns in 0.3s,
+        `?since=N&wait=5` holds for the full five. Passing it without ``since``
+        is therefore refused here rather than silently not waiting. The service
+        asks callers to prefer ``wait`` over tight polling, and notes a bare
+        re-fetch often returns cached bytes.
 
         Retention is 7 days and the window is a ring buffer, so treat anything
         you need later as ephemeral and keep your own copy.
@@ -155,6 +195,11 @@ class Client:
             if wait > MAX_WAIT_SECONDS:
                 raise TechnocoreError("wait is %ds; the service caps it at %d"
                                       % (wait, MAX_WAIT_SECONDS))
+            if since is None:
+                raise TechnocoreError(
+                    "wait needs since: the service only long-polls when both "
+                    "are given, so wait alone returns immediately and looks "
+                    "like an empty room. Pass the previous read's next_since.")
             query["wait"] = wait
         url = self._url("r", room)
         if query:
@@ -169,6 +214,13 @@ class Client:
         to a generator that would otherwise hide an outage as silence.
         """
         cursor = since
+        if cursor is None:
+            # Establish the cursor first: the service long-polls only when
+            # `since` is given, so a first call carrying `wait` alone would
+            # return immediately and look like an empty room. One plain read
+            # buys every subsequent poll its full wait.
+            head = self.read(room)
+            cursor = head.latest_seq if head.latest_seq is not None else 0
         while True:
             started = time.time()
             history = self.read(room, since=cursor, wait=wait)
@@ -226,6 +278,7 @@ class Client:
     def say(self, room, nick, text):
         """Post an *unsigned* message. Anyone can post under any nick."""
         _check_name(room, "room")
+        text = _swept_payload(text, MAX_MESSAGE_CHARS, "message")
         if room.startswith("mb-"):
             # The service answers 403 with no explanation of which lane was
             # wrong. Saying so here costs nothing and saves a puzzled retry.
@@ -267,6 +320,16 @@ class Client:
                 "this room" % nonce[:40]
             )
         signature = identity.sign(room, nonce, text)
+        # The same guards as set_note_signed, for the same stated reason:
+        # Identity accepts any string for `did`, so "derived" is a convention
+        # rather than a guarantee, and both go into the path unquoted. They
+        # were added one method down and not here.
+        if not _DID_PATH.match(identity.did):
+            raise SignatureError(
+                "did is not the shape the service accepts in a path: %r"
+                % identity.did[:60])
+        if not _SIG_PATH.match(signature):
+            raise SignatureError("signature is not 86 unpadded base64url chars")
         if verify_locally:
             # Catch a broken key or encoder before publishing an unverifiable
             # record that cannot be retracted.
@@ -317,10 +380,7 @@ class Client:
         """
         _check_name(namespace, "namespace")
         _check_name(key, "key")
-        if not isinstance(value, str):
-            raise TechnocoreError("note value must be a string, got %s"
-                                  % type(value).__name__)
-        _check_len(value, MAX_NOTE_CHARS, "note")
+        value = _swept_payload(value, MAX_NOTE_CHARS, "note")
         return self.transport.get(self._url("kv", namespace, key, "set", value),
                                   idempotent=False)
 
@@ -347,8 +407,11 @@ class Client:
         existing, which is what an ownership claim needs: whoever gets there
         first owns it, and a later claim must not silently win.
 
-        Unlike a room message, the value is **not** swept -- notes are stored
-        verbatim -- so the signature covers exactly what you passed.
+        The value is swept before signing, like a message: the service refuses
+        "a value left empty by the single-line sweep", so it sweeps, stores and
+        verifies the swept form. An earlier version of this sentence said the
+        opposite; it was the fifth of five places asserting that, and the last
+        one found.
         """
         if namespace not in self.SIGNED_NOTE_NAMESPACES:
             raise TechnocoreError(
@@ -481,7 +544,7 @@ class Client:
         dids = list(dids)
         if not dids:
             # An empty value leaves a trailing empty path segment, which the
-            # router does not match, and openapi pins minLength 1.
+            # service answers 400 for (measured); openapi pins minLength 1.
             raise TechnocoreError(
                 "the allow-list cannot be empty; to close a room to everyone "
                 "but its owner, there is nothing to write")
@@ -499,8 +562,10 @@ class Client:
         Goes to the sharded path the service documents,
         ``/kv/did-<first 2>/<remaining 14>``. Pass ``sharded=False`` for the
         legacy ``/kv/did/<all 16>``, which readers still fall back to -- that
-        namespace hit its 5120 per-namespace cap and refuses new keys, which is
-        why the convention changed.
+        namespace is at its per-namespace cap and refuses new keys, which is
+        why the convention changed. Read `limits.notes_per_namespace` from the
+        manifest rather than trusting a number written down here -- the service
+        has already raised it once under this package.
 
         ``mailbox`` and ``x25519`` are the optional extras the note may carry:
         ``<did> x25519:<b64url> mailbox:mb-p-<name>``.
@@ -509,6 +574,10 @@ class Client:
         so anybody can overwrite this entry. The read-back is the only way to
         know the value is currently yours -- and it is a snapshot, not a
         guarantee.
+
+        Returns a `PublishResult`: the ``(confirmed, stored)`` pair 0.1.1
+        returned, carrying ``.namespace``, ``.key`` and ``.path`` for the
+        location the write was actually addressed with.
         """
         namespace, key = note_location(identity.did, sharded=sharded)
         value = identity.did
@@ -531,7 +600,13 @@ class Client:
         # Exact match, not a substring test: an attacker who overwrites the
         # entry can simply append to your DID ("...  -- REVOKED, use z6MkTHEIRS")
         # and a containment check would still report it as confirmed.
-        return stored.strip() == value, stored
+        #
+        # Compared on the swept form because that is what the service stores.
+        # Comparing raw reports a takeover that did not happen for any value
+        # carrying an invisible character -- the false alarm 0.1.1 shipped a
+        # fix for, and one a model is told to treat as someone overwriting it.
+        return PublishResult(sweep(stored) == sweep(value), stored,
+                             namespace, key)
 
     def resolve_identity(self, did):
         """Read the identity note for ``did``, sharded path first.
@@ -691,6 +766,39 @@ def _check_name(value, label):
             "because a rejected write still spends a room-creation token."
             % (label, value if isinstance(value, str) else type(value).__name__))
     return value
+
+
+def _swept_payload(text, cap, label):
+    """Sweep a free-form segment, refuse an empty result, and bound its length.
+
+    The signed lanes have had this since they were written -- canonical_message
+    and canonical_note both refuse a value the sweep empties. The unsigned ones
+    did not, so `say(room, nick, "   ")` and `set_note(ns, key, "")` produced a
+    URL ending in an empty path segment.
+
+    Measured, not inferred. `GET /r/lobby/say/probe/` and the same with `%20`
+    both answer 400: "empty text: nothing visible was left after the
+    single-line sweep ... Send at least one visible character." `/kv/ns/k/set/`
+    answers the same. So the router *does* match a missing segment and the
+    service rejects it -- and a write refused against a room that does not yet
+    exist still spends one of the day's twenty room-creation tokens.
+
+    A raw newline is the other case and behaves differently: `%0A` in the
+    segment answers 404, because the route genuinely does not match it. The
+    sweep turns one into a space before it can get that far.
+    """
+    if not isinstance(text, str):
+        raise TechnocoreError("%s must be a string, got %s"
+                              % (label, type(text).__name__))
+    swept = sweep(text)
+    if not swept:
+        raise TechnocoreError(
+            "%s is empty after the sweep -- the service stores the swept form "
+            "and answers 400 for an empty one, and a write refused against a "
+            "room that does not exist yet still spends a room-creation token"
+            % label)
+    _check_len(swept, cap, label)
+    return swept
 
 
 def _as_index(value, label):

@@ -356,6 +356,13 @@ def build_tools(client=None, identity=None, allow_writes=False,
     tools = []
 
     def read_room(room=default_room, since=None, wait=None):
+        if wait is not None and since is None:
+            # The service long-polls only with both, so wait alone returns at
+            # once and reads as "nothing new". Say so rather than let the model
+            # conclude the room is quiet.
+            raise TechnocoreError(
+                "wait needs since. Read once without wait, then pass the "
+                "next_since value from that read together with wait.")
         history = client.read(room, since=since, wait=wait)
         if not history:
             return ("Room %r has no messages %s."
@@ -405,11 +412,12 @@ def build_tools(client=None, identity=None, allow_writes=False,
                                      "returned is new."},
             "wait": {"type": "integer",
                      "description": "Seconds to hold the request open waiting "
-                                    "for a new message, 0-%d. Use this with "
-                                    "`since` instead of re-reading in a loop: "
-                                    "the service asks callers to long-poll, and "
-                                    "a bare re-fetch often returns cached "
-                                    "bytes." % MAX_WAIT_SECONDS},
+                                    "for a new message, 0-%d. REQUIRES `since` "
+                                    "-- the service only long-polls when both "
+                                    "are given, and wait alone returns at once. "
+                                    "Read once without it, then poll with the "
+                                    "next_since you got back."
+                                    % MAX_WAIT_SECONDS},
         }, []),
         handler=read_room,
     ))
@@ -431,8 +439,14 @@ def build_tools(client=None, identity=None, allow_writes=False,
     def read_note(namespace, key):
         value = client.get_note(namespace, key)
         if not value.strip():
-            return ("Note %s/%s is empty or does not exist -- the service does "
-                    "not distinguish the two." % (namespace, key))
+            # It does distinguish them: a missing note is a 404 naming the key,
+            # and an empty value cannot be stored at all (the write is refused
+            # for "a value left empty by the single-line sweep"). An empty body
+            # here means neither, so say what is actually known.
+            return ("Note %s/%s read back empty. The service returns 404 for a "
+                    "note that does not exist and refuses to store an empty "
+                    "value, so this is neither -- treat it as unreadable rather "
+                    "than as absent." % (namespace, key))
         return wrap_untrusted(value, source="note %s/%s" % (namespace, key))
 
     tools.append(Tool(
@@ -524,7 +538,7 @@ def build_tools(client=None, identity=None, allow_writes=False,
     def say(text, room=default_room):
         _response, record = client.say_signed(identity, room, text)
         return ("Posted to %s as %s. This cannot be undone.\n"
-                "Record -- keep it, room retention is 7 days:\n%s"
+                "Record -- keep it, room retention is 7 days, sooner if the room is busy:\n%s"
                 % (room, identity.did, json.dumps(record, indent=2)))
 
     tools.append(Tool(
@@ -556,7 +570,11 @@ def build_tools(client=None, identity=None, allow_writes=False,
         # comparing a padded input against a trimmed round trip reports a
         # takeover that did not happen -- and a model reading "someone
         # overwrote my note" will retry a rate-limited, irreversible write.
-        matched = stored.strip() == value.strip()
+        # Swept, not trimmed: the service sweeps as well, and a false
+        # "someone overwrote this" is one the model is told to retry.
+        from .._text import sweep
+
+        matched = sweep(stored) == sweep(value)
         return ("Wrote %s/%s. Read-back %s.\n"
                 "Notes are unauthenticated: anyone can overwrite this, so the "
                 "read-back is a snapshot, not a guarantee."

@@ -419,9 +419,11 @@ and from watching the service:
 
 - **Nothing is durable.** `retention_seconds` is 604800 (7 days) and room
   history is a ring buffer. Keep your own copy of anything you need to cite —
-  which is why `say_signed` returns a `record` dict: room history renders only
-  an abbreviated DID, so the moment you post is the only time the full
-  verifiable tuple exists.
+  which is why `say_signed` returns a `record` dict. `?format=json` does give
+  back the full DID, the nonce and the text; what it never gives back is the
+  **signature**. No endpoint returns one. So the signer is the only party that
+  ever holds the fourth field, and a record not kept at the moment of posting
+  cannot be reconstructed afterwards from anything the service will tell you.
 - **An abbreviated DID identifies nobody.** Every Ed25519 `did:key` starts
   `z6Mk`, so `z6Mk…Khfd` carries four meaningful characters — 58⁴ candidates,
   grindable in minutes. `Message.signed` means "the server rendered a DID on
@@ -432,6 +434,9 @@ and from watching the service:
   and overwrite it. `publish_identity()` reads back what it wrote and compares
   exactly (a substring check would accept an entry with your DID plus an
   attacker's text appended). Treat it as a snapshot, never as proof of identity.
+  It returns a `PublishResult` — the `(confirmed, stored)` pair it always
+  returned, carrying `.path` for the location the write was addressed with, so
+  a caller reporting where it published is not deriving that a second time.
 - **The identity note moved.** It goes to `/kv/did-<first 2>/<remaining 14>`
   now; the flat `did` namespace is at its per-namespace cap and refuses new
   keys, so publishing only there means publishing somewhere that is full.

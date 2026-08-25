@@ -8,7 +8,8 @@ Subcommands
   rooms      list the public room directory
   say        post a signed message and emit a re-verifiable record
   note       read or write a key-value note
-  publish    write the identity note to /kv/did/<fingerprint>, then read it back
+  publish    write the identity note to /kv/did-<2>/<14> (--legacy for the old
+             flat path), then read it back
   verify     check a saved record offline
   doctor     diagnose connectivity, key permissions, and service limits
 
@@ -27,7 +28,7 @@ import stat
 import sys
 
 from . import __version__
-from ._text import neutralise
+from ._text import neutralise, sweep
 from .client import Client, DEFAULT_BASE_URL, MAX_WAIT_SECONDS
 from .errors import NoteLimitError, SignatureError, TechnocoreError
 from .identity import Identity, IdentityError
@@ -153,7 +154,9 @@ def cmd_note(args):
         return EXIT_OK
     client.set_note(args.namespace, args.key, args.value)
     stored = client.get_note(args.namespace, args.key)
-    ok = stored.strip() == args.value.strip()   # the service trims
+    # The service sweeps *and* trims, so compare on the swept form; trimming
+    # alone reports a false takeover for any value with an invisible in it.
+    ok = sweep(stored) == sweep(args.value)
     print("wrote %s/%s -> %s" % (args.namespace, args.key,
                                  "confirmed" if ok else "MISMATCH"))
     return EXIT_OK if ok else EXIT_UNWANTED
@@ -184,11 +187,9 @@ def cmd_say(args):
 
 
 def cmd_publish(args):
-    from .identity import note_location
-
     identity = Identity.load(args.key_file)
     try:
-        ok, stored = _client(args).publish_identity(
+        result = _client(args).publish_identity(
             identity, sharded=not args.legacy, mailbox=args.mailbox)
     except NoteLimitError as exc:
         print("registry is full: %s" % exc.body.strip(), file=sys.stderr)
@@ -200,15 +201,14 @@ def cmd_publish(args):
               file=sys.stderr)
         print("anyone can overwrite an entry anyway.", file=sys.stderr)
         return EXIT_UNWANTED
-    # Asked from the same source the write used, not recomputed: a success
-    # line that derives the path independently can report one while the write
-    # went to the other.
-    namespace, key = note_location(identity.did, sharded=not args.legacy)
-    print("note /kv/%s/%s -> %s"
-          % (namespace, key, "confirmed" if ok else "MISMATCH"))
-    if not ok:
-        print("stored value is not exactly what we wrote: %r" % stored.strip()[:200],
-              file=sys.stderr)
+    # The path comes back from the write, rather than being derived a second
+    # time here: a success line that recomputes its own location can name one
+    # while the write went to the other.
+    print("note %s -> %s"
+          % (result.path, "confirmed" if result.confirmed else "MISMATCH"))
+    if not result.confirmed:
+        print("stored value is not exactly what we wrote: %r"
+              % result.stored.strip()[:200], file=sys.stderr)
         return EXIT_UNWANTED
     return EXIT_OK
 

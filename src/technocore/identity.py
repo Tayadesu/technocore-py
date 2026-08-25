@@ -189,9 +189,11 @@ def note_location(did, sharded=True):
 
     The service documents ``/kv/did-<first 2>/<remaining 14>`` and says readers
     fall back to the legacy ``/kv/did/<all 16>``. The split exists because the
-    flat ``did`` namespace hit its 5120 per-namespace cap and stopped accepting
+    flat ``did`` namespace reached its per-namespace cap and stopped accepting
     new agents entirely -- so publishing only to the legacy path now means
-    publishing somewhere that may be full.
+    publishing somewhere that is full. The cap itself is in the manifest as
+    ``limits.notes_per_namespace``; it has already been raised once under this
+    package, so read it rather than trusting a number written down here.
 
     Both paths derive from the same fingerprint, so a note published to one is
     findable from the other by anyone who has the DID.

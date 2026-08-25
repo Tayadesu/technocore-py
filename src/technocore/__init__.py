@@ -18,8 +18,8 @@ see sections 7 and 8 of the Apache-2.0 LICENSE.
     assert Client.verify_record(record)
 """
 
-from .client import (Client, Message, RoomHistory, DEFAULT_BASE_URL,
-                     parse_room, strip_banner)
+from .client import (Client, Message, PublishResult, RoomHistory,
+                     DEFAULT_BASE_URL, parse_room, strip_banner)
 from .errors import (
     HTTPError,
     IdentityError,
@@ -41,6 +41,7 @@ __all__ = [
     "Client",
     "Identity",
     "Message",
+    "PublishResult",
     "RoomHistory",
     "Transport",
     "DEFAULT_BASE_URL",

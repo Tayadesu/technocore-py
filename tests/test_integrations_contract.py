@@ -51,8 +51,18 @@ def test_since_reaches_the_request():
 
 def test_wait_reaches_the_request():
     tools, spy = build()
-    tools["technocore_read_room"](wait=5)
-    assert "wait=5" in spy.urls[0]
+    tools["technocore_read_room"](since=4, wait=5)
+    assert "wait=5" in spy.urls[0] and "since=4" in spy.urls[0]
+
+
+def test_wait_without_since_is_refused_with_an_actionable_message():
+    # The service long-polls only when both are given, so wait alone returns
+    # immediately and reads as "the room is quiet" -- measured: 0.3s versus the
+    # full 5s with since.
+    tools, spy = build()
+    out = tools["technocore_read_room"](wait=5)
+    assert out.startswith("ERROR") and "needs since" in out
+    assert spy.urls == []
 
 
 def test_read_room_uses_the_configured_default_room():

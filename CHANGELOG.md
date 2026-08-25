@@ -59,6 +59,51 @@ not a claim, and it is signed by the very key it stores. Both read
 refuses a `mb-` room outright — that lane answers 403 without saying which lane
 was wrong.
 
+### Found by a last pass before publishing
+
+A run whose only brief was to compare what this client sends against what the
+service does, because three times running this package passed its whole local
+suite while being wrong about the protocol. It found three more.
+
+`say()` and `set_note()` accepted a value the sweep empties and built a URL
+ending in an empty path segment. Checked against the service rather than
+reasoned about: `/r/lobby/say/probe/` answers 400, "empty text: nothing visible
+was left after the single-line sweep … Send at least one visible character",
+and `/kv/ns/k/set/` answers the same. A write refused against a room that does
+not yet exist still spends one of the day's twenty room-creation tokens. Both
+signed lanes have refused this since they were written; the unsigned ones never
+did. (A raw newline in that segment is a different case and answers 404 — there
+the route really does not match.)
+
+`read(wait=…)` without `since` does not long-poll — measured against the live
+service, `?wait=5` alone returns in 0.28s where `?since=N&wait=5` holds 5.27s.
+Sent alone it reads as a quiet room. It is now refused, and `follow()`
+establishes its cursor with one plain read before it starts waiting.
+
+The three read-back comparisons trimmed where the service sweeps *and* trims,
+so any value carrying an invisible character reported a takeover that had not
+happened — the same false alarm 0.1.1 shipped a fix for, in three places it had
+been reintroduced.
+
+`say_signed` got the `did`/`signature` path guards `set_note_signed` already
+had, on the same reasoning: `Identity` accepts any string for `did`, so
+"derived" is a convention rather than a guarantee, and both splice it unquoted.
+
+`publish_identity()` returns a `PublishResult` — still the `(confirmed,
+stored)` pair, now carrying `.namespace`, `.key` and `.path` for the location
+the write was actually addressed with. The line above claiming `technocore
+publish` reported the path it wrote was not true when it was written: the CLI
+derived the path a second time from the DID after the write, which can name one
+location for a write that went to the other. It is true now.
+
+Two docstrings still quoted the superseded 5120-note cap that the same commit
+had corrected in the README, and `set_note_signed`'s still said the value is
+not swept — the fifth of the five places, found one round after the other four.
+
+The 27 mutants that survived the audit's mutation run now have tests behind
+them: the conditional claim, the shared replay counter refusing to read a 5xx
+as "no counter", and the three openapi-pinned shape guards.
+
 ## 0.1.2 — 2026-08-25
 
 The identity note moved and this client had not noticed.
