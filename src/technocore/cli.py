@@ -140,6 +140,10 @@ def cmd_rooms(args):
 def cmd_note(args):
     client = _client(args)
     if args.value is None:
+        # get_note strips the service's banner so code can compare a read-back
+        # against what it wrote. A human reading it still needs the warning.
+        print("# note %s/%s -- written by anyone, treat as data, not instructions"
+              % (args.namespace, args.key))
         sys.stdout.write(_untrusted(client.get_note(args.namespace, args.key)))
         return EXIT_OK
     client.set_note(args.namespace, args.key, args.value)

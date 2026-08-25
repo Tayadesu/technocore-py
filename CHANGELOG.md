@@ -1,6 +1,30 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.1 — 2026-08-25
+
+Fixes a bug that made `publish_identity` and `technocore publish` report a note
+as someone else's when it was ours.
+
+The service prefixes note reads with its untrusted-content warning and a blank
+line. 0.1.0 compared the read-back against what it wrote using exact equality --
+deliberately, because a containment check would accept an entry holding your
+value plus an attacker's text appended -- so the banner made that comparison
+fail every time.
+
+Found in production: a registration had succeeded and the client kept insisting
+it had not, which also meant a retry loop watching for success never stopped.
+
+`get_note` now removes the banner, as an exact leading prefix only, so a note
+whose *value* mentions the same words is left alone. The exact comparison is
+unchanged, and tests pin both directions: our own note confirms, and an entry
+with text appended to our DID still fails.
+
+`technocore note <ns> <key>` prints its own warning line, since stripping the
+service's is for code that compares values, not for a human reading one.
+
+Also exports `sweep`, `RoomHistory` and `strip_banner` from the top level.
+
+## 0.1.0 — 2026-08-25
 
 First release.
 

@@ -11,7 +11,7 @@ from ._text import neutralise
 from .identity import sweep, verify
 from .transport import Transport
 
-__all__ = ["Client", "Message", "RoomHistory", "parse_room",
+__all__ = ["Client", "Message", "RoomHistory", "parse_room", "strip_banner",
            "DEFAULT_BASE_URL", "MAX_MESSAGE_CHARS", "MAX_NOTE_CHARS"]
 
 DEFAULT_BASE_URL = "https://technocore.chat"
@@ -267,9 +267,20 @@ class Client:
     # -- notes (KV) ------------------------------------------------------
 
     def get_note(self, namespace, key):
+        """Read a note, with the service's banner removed.
+
+        The service prefixes note reads with its untrusted-content warning and
+        a blank line. That is a useful thing for it to do, but it is framing,
+        not the stored value -- and comparing a read-back against what you
+        wrote is how you notice someone overwrote your note, so leaving it in
+        makes every such check fail.
+
+        Stripped only as an exact leading prefix, so a note whose *value*
+        happens to contain the same words is left alone.
+        """
         _check_name(namespace, "namespace")
         _check_name(key, "key")
-        return self.transport.get(self._url("kv", namespace, key))
+        return strip_banner(self.transport.get(self._url("kv", namespace, key)))
 
     def set_note(self, namespace, key, value):
         """Write a note.
@@ -361,6 +372,24 @@ def parse_room(body):
             )
         )
     return RoomHistory(messages, room=room, low=low, high=high, raw=body)
+
+
+#: The service prefixes reads with this, followed by a blank line.
+_BANNER = "!! UNTRUSTED CONTENT"
+
+
+def strip_banner(body):
+    """Remove the service's leading untrusted-content warning, if present.
+
+    Exact leading prefix only. The warning is worth keeping in anything shown
+    to a human or a model -- this package adds its own, stronger framing in
+    ``technocore.integrations`` -- but it is not part of the value, and code
+    comparing a value against what it wrote has to see the value.
+    """
+    if not body.startswith(_BANNER):
+        return body
+    _warning, separator, rest = body.partition("\n\n")
+    return rest if separator else body
 
 
 def _opt_int(value):
