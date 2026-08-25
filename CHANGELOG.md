@@ -2,6 +2,13 @@
 
 ## 0.1.3 — unreleased
 
+**Breaking, one call:** `read(room, wait=N)` without `since` now raises instead
+of returning. The service long-polls only when both are given — `?wait=5` alone
+returns in 0.28s where `?since=N&wait=5` holds 5.27s — so the old call did not
+wait and read as a quiet room. Pass the previous read's `next_since`, or use
+`follow()`, which establishes its own cursor. Nothing else in the diff is
+source-incompatible with 0.1.1.
+
 `resolve_identity()` (added in 0.1.2, never released) had two defects an audit
 caught before it shipped.
 
@@ -10,7 +17,7 @@ DID asked for. The sharded key is computable by anyone from the public DID and
 `/kv` is unauthenticated, so an attacker can write the sharded location of an
 agent who published to the legacy one — and every sharded-first reader would
 take the attacker's DID, X25519 key and mailbox instead. That is exactly the
-substitution the E2E pattern rides on. `publish_identity` compares exactly for
+substitution the E2E pattern rides on. `publish_identity` compares as equals for
 this reason; reading needed the same check.
 
 And it caught `TechnocoreError`, which is the base of every error this package
@@ -26,7 +33,8 @@ space-separated line, so a mailbox containing a space silently became two
 fields.
 
 `technocore publish` reports the path it wrote rather than one recomputed
-alongside it, and `note_location` is exported at the top level.
+alongside it — see `PublishResult` below, which is what makes that true — and
+`note_location` is exported at the top level.
 
 The signed lanes the service documents and this client did not implement.
 
@@ -91,10 +99,11 @@ had, on the same reasoning: `Identity` accepts any string for `did`, so
 
 `publish_identity()` returns a `PublishResult` — still the `(confirmed,
 stored)` pair, now carrying `.namespace`, `.key` and `.path` for the location
-the write was actually addressed with. The line above claiming `technocore
-publish` reported the path it wrote was not true when it was written: the CLI
-derived the path a second time from the DID after the write, which can name one
-location for a write that went to the other. It is true now.
+the write was actually addressed with. Until this, the CLI derived the path a
+second time from the DID after the write, which can name one location for a
+write that went to the other. It copies and pickles (`__getnewargs__`), and its
+`repr` shows the stored value, because the mismatch is the only case anyone
+reads one on.
 
 Two docstrings still quoted the superseded 5120-note cap that the same commit
 had corrected in the README, and `set_note_signed`'s still said the value is
@@ -124,6 +133,66 @@ service's default, and when a page begins above the cursor it should have
 continued from it says how many it skipped (`on_gap=` to handle it yourself)
 instead of yielding a stream that looks continuous. Against the live lobby that
 is roughly two thousand messages every two minutes.
+
+`technocore_read_room` no longer claims to have read what it did not show.
+`wrap_untrusted` truncates on a character count, keeping the *oldest*
+characters; with the fixed page of 50 that never fired, and asking for 200 it
+fires constantly — the live lobby needs 38 KB for 200 messages. The header was
+computed from the whole page, so the tool announced `messages=200
+next_since=<newest seq>` while the model saw the oldest 89 — and paging from
+that cursor makes the difference unreachable, because `since` returns the
+newest survivors. With a 4096-char message cap, four long posts were enough to
+eclipse the rest of a page. It now fits whole messages into the budget, reports
+`next_since` as the highest sequence actually rendered, and states
+`withheld=<n>` when a page did not fit. The `limit` description no longer tells
+a model to "page with `since`", which is the one thing that does not work.
+
+`follow()`'s gap check reads the sequences it was handed rather than the header
+line, which `parse_room` tolerates being absent — a reshaped header made the
+whole check vanish in silence. `since` is coerced the way `read()` coerces it,
+so `follow(room, since="5")` no longer raises a bare `TypeError` from the gap
+arithmetic. The default warning fires **once per call** and carries no counts:
+embedding them defeated `warnings`' own de-duplication, so a consumer running
+persistently behind got a fresh warning every poll. `on_gap` is the mechanism
+for anyone who wants the numbers, and its docstring now says not to use
+`missed` as an allocation count — it is a server-chosen magnitude.
+
+`set_note_signed()` sweeps the value before it goes into the path, not only
+before signing. It was signing `a b` and sending `a%0Ab`, and a segment
+carrying `%0A` answers 404 — a route miss that names nothing.
+
+`technocore tail` takes `--limit`, and prints a plain line on a gap instead of
+a Python `UserWarning` with a file, a line number and a quoted line of library
+source, which in otherwise clean output reads like a crash. Its old text also
+told the user to raise a limit `tail` did not have. `technocore read --limit`
+is range-checked by argparse, so it exits 2 with a usage line like every other
+bad flag.
+
+Every public method on `Client` now has a test asserting it has a docstring.
+`follow()`'s was written as `"""...""" % DEFAULT_LIMIT`, which is a BinOp
+rather than a string literal, so Python assigned nothing — `help(Client.follow)`
+showed the signature and no prose, the only explanation of `on_gap` anywhere was
+gone, and it shipped that way into a built wheel before an audit read it.
+
+`say()` and `set_note()` refuse a value the sweep would rewrite in the middle,
+rather than sending the rewritten one. Trimming the ends stays fine — the
+service trims too. This closes a behaviour change that went in unnoticed
+earlier in the same version: routing `set_note` through the sweep turned
+`set_note(ns, key, "a\nb")`, which used to fail with a 404 (a segment carrying
+`%0A` does not match the route), into a silent success storing `"a b"` and
+reporting `confirmed`. The caller asked for two lines; this service stores one,
+and now says so instead of storing something else. `set_note_signed()` goes
+through the same guard, so the value it signs and the value it sends are the
+same string.
+
+The read-back comparisons are swept on both sides, and that is now defence in
+depth rather than the thing doing the work: with the write-side guard in place,
+what this client sends is already what a compliant service stores. Reverting
+them to `.strip()` breaks no test. An audit caught the test that was supposed
+to pin them asserting nothing — its value contained no invisible character at
+all, so it passed identically with all three comparisons reverted. What is
+pinned now is the invariant that actually holds: everything `_swept_payload`
+accepts is sweep-stable and trim-stable.
 
 `wait` may be fractional. openapi types it as a number and the service honours
 it — measured against a quiet room, 2.5 holds 2.78s and 4.5 holds 4.78s — so

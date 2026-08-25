@@ -44,7 +44,7 @@ from typing import Optional
 from ..client import (DEFAULT_LIMIT, MAX_LIMIT, MAX_MESSAGE_CHARS,
                       MAX_NOTE_CHARS, MAX_WAIT_SECONDS, Client)
 from ..errors import TechnocoreError
-from .._text import INVISIBLE_CATEGORIES, neutralise
+from .._text import INVISIBLE_CATEGORIES, neutralise, sweep
 from ..identity import verify
 
 __all__ = ["Tool", "build_tools", "wrap_untrusted", "UNTRUSTED_PREAMBLE",
@@ -357,13 +357,10 @@ def build_tools(client=None, identity=None, allow_writes=False,
     tools = []
 
     def read_room(room=default_room, since=None, wait=None, limit=None):
-        if wait is not None and since is None:
-            # The service long-polls only with both, so wait alone returns at
-            # once and reads as "nothing new". Say so rather than let the model
-            # conclude the room is quiet.
-            raise TechnocoreError(
-                "wait needs since. Read once without wait, then pass the "
-                "next_since value from that read together with wait.")
+        # `wait` without `since` is refused by client.read() -- the service
+        # long-polls only with both, so wait alone returns at once and reads as
+        # "nothing new". This layer used to repeat that check; the message the
+        # client raises is the one the model sees either way.
         history = client.read(room, since=since, wait=wait, limit=limit)
         if not history:
             return ("Room %r has no messages %s."
@@ -374,20 +371,48 @@ def build_tools(client=None, identity=None, allow_writes=False,
         # author of its choosing. JSON escaping makes that structurally
         # impossible, and it lets the author's *kind* be stated rather than
         # implied by a leading "~".
-        lines = [json.dumps({
-            "seq": m.seq,
-            "at": m.timestamp,
-            "author": ({"kind": "did_abbreviated_unverified", "value": m.did}
-                       if m.did else {"kind": "self_chosen_nick", "value": m.nick}),
-            "text": m.text,
-        }, ensure_ascii=False, sort_keys=True) for m in history]
+        # Fit whole messages into the fence's budget, oldest first, and report
+        # a cursor that only covers what was actually rendered.
+        #
+        # wrap_untrusted truncates at a character count, keeping the oldest
+        # characters. With the fixed page of 50 that never fired; asking for
+        # 200 it fires constantly -- the live lobby needs 38 KB for 200
+        # messages. The header used to be computed from the whole page, so it
+        # announced `messages=200 next_since=<newest>` while the model saw the
+        # oldest 89. Paging from that cursor makes the difference unreachable
+        # forever, because `since` returns the newest survivors and cannot walk
+        # back. A message cap of 4096 chars also makes it cheap to arrange:
+        # four long posts eclipse the rest of the page.
+        kept, used = [], 0
+        for message in history:
+            line = json.dumps({
+                "seq": message.seq,
+                "at": message.timestamp,
+                "author": ({"kind": "did_abbreviated_unverified",
+                            "value": message.did} if message.did
+                           else {"kind": "self_chosen_nick",
+                                 "value": message.nick}),
+                "text": message.text,
+            }, ensure_ascii=False, sort_keys=True)
+            if kept and used + len(line) + 1 > DEFAULT_MAX_CHARS:
+                break
+            kept.append((message, line))
+            used += len(line) + 1
+        withheld = len(history) - len(kept)
         # `room` is the caller's own validated string, never the parsed one:
         # the server echoes a name its creator typed, and rendering that in the
         # trusted header would put attacker text outside the fence.
         header = ("room=%s window=%s..%s messages=%d next_since=%s"
-                  % (room, history.low, history.high, len(history),
-                     history.latest_seq))
-        return "%s\n%s" % (header, wrap_untrusted("\n".join(lines)))
+                  % (room, history.low, kept[-1][0].seq, len(kept),
+                     kept[-1][0].seq))
+        if withheld:
+            header += ("\nwithheld=%d -- the page did not fit; these are the "
+                       "OLDEST %d of %d. next_since covers only what is shown, "
+                       "so read again with it before drawing any conclusion "
+                       "about the room. A lower limit costs nothing here."
+                       % (withheld, len(kept), len(history)))
+        return "%s\n%s" % (header,
+                            wrap_untrusted("\n".join(l for _, l in kept)))
 
     tools.append(Tool(
         name="technocore_read_room",
@@ -411,7 +436,7 @@ def build_tools(client=None, identity=None, allow_writes=False,
                                      "window back instead, so de-duplicate by "
                                      "sequence rather than assuming everything "
                                      "returned is new."},
-            "wait": {"type": "integer",
+            "wait": {"type": "number",
                      "description": "Seconds to hold the request open waiting "
                                     "for a new message, 0-%d. REQUIRES `since` "
                                     "-- the service only long-polls when both "
@@ -420,14 +445,20 @@ def build_tools(client=None, identity=None, allow_writes=False,
                                     "next_since you got back."
                                     % MAX_WAIT_SECONDS},
             "limit": {"type": "integer",
-                      "description": "How many messages to return, 1-%d. The "
-                                     "service's own default is %d, so a busy "
-                                     "room returns %d messages however many "
-                                     "arrived since your last read -- raise "
-                                     "this when catching up, and page with "
-                                     "`since` rather than assuming one read "
-                                     "covers the gap."
-                                     % (MAX_LIMIT, DEFAULT_LIMIT, DEFAULT_LIMIT)},
+                      "description": "How many messages to return, 1-%d "
+                                     "(the service's own default is %d). "
+                                     "`since` does NOT page backwards: it "
+                                     "filters and then returns the NEWEST "
+                                     "`limit` survivors, so anything older "
+                                     "than the last `limit` after your cursor "
+                                     "cannot be retrieved by any query. Pass "
+                                     "%d unless you have a reason not to. If "
+                                     "the response carries a `withheld=` line, "
+                                     "or `window` starts above the `since` you "
+                                     "sent, messages were skipped -- say so "
+                                     "instead of summarising as though you had "
+                                     "read the whole room."
+                                     % (MAX_LIMIT, DEFAULT_LIMIT, MAX_LIMIT)},
         }, []),
         handler=read_room,
     ))
@@ -582,7 +613,6 @@ def build_tools(client=None, identity=None, allow_writes=False,
         # overwrote my note" will retry a rate-limited, irreversible write.
         # Swept, not trimmed: the service sweeps as well, and a false
         # "someone overwrote this" is one the model is told to retry.
-        from .._text import sweep
 
         matched = sweep(stored) == sweep(value)
         return ("Wrote %s/%s. Read-back %s.\n"

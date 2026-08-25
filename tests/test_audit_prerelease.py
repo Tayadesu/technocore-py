@@ -10,7 +10,7 @@ left in the docstrings.
 
 import pytest
 
-from technocore import Client, Identity
+from technocore import Client, Identity, sweep
 from technocore.errors import SignatureError, TechnocoreError
 
 
@@ -55,16 +55,28 @@ def test_no_unsigned_write_ends_in_an_empty_segment():
     assert not any(url.endswith("/") for url in spy.urls)
 
 
-def test_a_raw_newline_never_reaches_a_path_segment():
+@pytest.mark.parametrize("text", ["a\nb", "a\u200bb", "a\u2028b", "a\x85b"])
+def test_a_value_the_sweep_would_rewrite_is_refused_not_rewritten(text):
     # Measured, and unlike the empty segment this one really is the router:
-    # `/r/lobby/say/probe/a%0Ab` answers 404, not 400. say() was protected only
-    # incidentally, by sweeping.
+    # `/r/lobby/say/probe/a%0Ab` answers 404, not 400.
+    #
+    # Sweeping it locally would make that 404 into a silent success storing
+    # "a b" -- the caller asked for two lines, got one, and was told confirmed.
+    # Trimming the ends stays fine; the service trims too.
     spy = Spy()
     client = Client(transport=spy)
-    client.say("probe-room", "nick", "a\nb")
-    client.set_note("ns", "key", "a\nb")
-    assert not any("%0A" in url for url in spy.urls)
-    assert all("a%20b" in url for url in spy.urls)
+    for call in (lambda: client.say("probe-room", "nick", text),
+                 lambda: client.set_note("ns", "key", text)):
+        with pytest.raises(TechnocoreError, match="single-line sweep would"):
+            call()
+    assert spy.urls == []
+
+
+@pytest.mark.parametrize("text", ["  padded  ", "\tx\t", "\n x \n"])
+def test_trimming_the_ends_is_not_a_rewrite(text):
+    spy = Spy()
+    Client(transport=spy).set_note("ns", "key", text)
+    assert spy.urls[0].endswith("/x") or spy.urls[0].endswith("/padded")
 
 
 # -- wait needs since --------------------------------------------------------
@@ -135,21 +147,59 @@ def test_a_bad_did_never_reaches_a_url_path(did):
 
 # -- read-backs compare on what the service stores ---------------------------
 
-def test_a_value_with_an_invisible_does_not_report_a_false_takeover():
-    # The service sweeps *and* trims, so a value carrying a zero-width
-    # character reads back with a space. Comparing trimmed raw text reports
-    # MISMATCH -- the false alarm 0.1.1 shipped a fix for, and one a model is
-    # told means someone overwrote the note.
-    identity = Identity.generate()
-    value = "%s x25519:AbC" % identity.did
-
-    class Sweeping:
+def _echoing(value):
+    class Echo:
         def get(self, url, idempotent=True):
             return "ok" if "/set/" in url else value
+    return Echo()
 
-    ok, _stored = Client(transport=Sweeping()).publish_identity(
-        identity, x25519="AbC")
-    assert ok
+
+# The characters the service's sweep set (Cc Cf Cs Co Zl Zp) does not cover.
+# They are stored verbatim, so they are the ones that can still differ between
+# what a caller typed and what comes back.
+PASSES_THE_SWEEP = ["\ufe0f", "\u3164", "\u2800"]
+
+
+@pytest.mark.parametrize("invisible", PASSES_THE_SWEEP)
+def test_a_character_the_sweep_ignores_survives_the_round_trip(invisible):
+    # The first version of this test built a value with no invisible character
+    # in it at all, so it passed identically with the read-back fix reverted --
+    # an audit reverted all three comparison sites and got the same green
+    # suite. These three are the only characters that can reach a note and come
+    # back unchanged: a zero-width space is refused at the write now, and the
+    # service sweeps everything else in its own set.
+    value = "hello%sworld" % invisible
+    assert sweep(value) == value, "if the sweep touched it, it never gets stored"
+
+    client = Client(transport=_echoing(value))
+    client.set_note("ns", "key", value)
+    assert sweep(client.get_note("ns", "key")) == sweep(value)
+
+
+@pytest.mark.parametrize("invisible", PASSES_THE_SWEEP)
+def test_swapping_one_invisible_for_another_is_still_a_mismatch(invisible):
+    # Worth pinning: an earlier attempt at this comparison ran both sides
+    # through `neutralise`, which maps every one of these to U+FFFD. That made
+    # the check *less* discriminating -- an attacker could substitute one
+    # invisible for another and the read-back would report "confirmed".
+    other = next(c for c in PASSES_THE_SWEEP if c != invisible)
+    written = "hello%sworld" % invisible
+    stored = "hello%sworld" % other
+    client = Client(transport=_echoing(stored))
+    client.set_note("ns", "key", written)
+    assert sweep(client.get_note("ns", "key")) != sweep(written)
+
+
+def test_what_the_client_can_write_is_already_sweep_stable():
+    # This is what makes the read-back comparison exact rather than fuzzy:
+    # _swept_payload refuses anything the sweep would rewrite, so the bytes
+    # sent are the bytes a compliant service stores.
+    from technocore.client import _swept_payload
+
+    for value in ["plain", "  padded  ", "a b", "hello\ufe0fworld", "x" * 100]:
+        sent = _swept_payload(value, 8192, "note")
+        assert sweep(sent) == sent, value
+        assert sent.strip() == sent, value
 
 
 def test_a_genuine_takeover_still_fails_the_comparison():
@@ -251,7 +301,7 @@ def test_a_whole_number_field_refuses_truncation(field, value):
     # asked for is the same failure this module refuses to let the service
     # commit on its side.
     spy = Spy()
-    with pytest.raises(TechnocoreError, match="whole number|an integer"):
+    with pytest.raises(TechnocoreError, match="whole number|not a bool"):
         Client(transport=spy).read("lobby", **{field: value})
     assert spy.urls == []
 
@@ -287,8 +337,14 @@ def test_follow_warns_about_the_messages_it_skipped():
     with _warnings.catch_warnings(record=True) as caught:
         _warnings.simplefilter("always")
         next(generator)
+        next(generator)
+        next(generator)
+    # Once per follow(), and with no counts in the text. An earlier version
+    # interpolated them, which defeated `warnings`' own de-duplication: a
+    # consumer running persistently behind got a fresh warning every poll.
     assert len(caught) == 1
-    assert "skipped 4999" in str(caught[0].message)
+    assert "is skipping messages" in str(caught[0].message)
+    assert "on_gap" in str(caught[0].message)
 
 
 def test_a_gap_handler_replaces_the_warning():

@@ -195,12 +195,24 @@ def test_publish_identity_reports_the_location_it_wrote():
         def get(self, url, idempotent=True):
             return "ok" if "/set/" in url else identity.did
 
+    class Recording:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, url, idempotent=True):
+            self.urls.append(url)
+            return "ok" if "/set/" in url else identity.did
+
     for sharded in (True, False):
-        result = Client(transport=Store()).publish_identity(
-            identity, sharded=sharded)
+        spy = Recording()
+        result = Client(transport=spy).publish_identity(identity,
+                                                        sharded=sharded)
         assert isinstance(result, PublishResult)
-        assert result.path == "/kv/%s/%s" % (result.namespace, result.key)
         assert result.confirmed is True
+        # Against the URL that was actually requested, not against the
+        # expression `.path` is computed from -- which cannot fail.
+        write = [u for u in spy.urls if "/set/" in u][0]
+        assert write.split("/set/")[0].endswith(result.path)
 
 
 def test_publish_identity_still_unpacks_as_a_pair():

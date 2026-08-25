@@ -112,6 +112,20 @@ def _emit(message, as_json):
                                   message.text))
 
 
+def _limit_arg(value):
+    """Range-check --limit in argparse, so it exits 2 with a usage line like
+    every other bad flag rather than 1 with a bare exception name."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer, got %r" % value)
+    if not 1 <= number <= MAX_LIMIT:
+        raise argparse.ArgumentTypeError(
+            "must be 1..%d, got %d (the service silently substitutes its "
+            "default of %d for anything else)" % (MAX_LIMIT, number, DEFAULT_LIMIT))
+    return number
+
+
 def cmd_read(args):
     history = _client(args).read(args.room, since=args.since,
                                  limit=args.limit)
@@ -124,12 +138,25 @@ def cmd_read(args):
     return EXIT_OK
 
 
+def _report_gap(missed, first_seq, cursor):
+    """Print the gap as a plain line, not as a Python warning.
+
+    `warnings.warn` prints the library's file, line number and a quoted line of
+    source, which in otherwise clean CLI output reads like a crash. It also
+    suggested raising `limit` and polling more often, and `tail` had neither.
+    """
+    print("# skipped %d message(s): sequences %d..%d are unreachable -- "
+          "`since` returns the newest matches and cannot page backwards"
+          % (missed, cursor + 1, first_seq - 1), file=sys.stderr)
+
+
 def cmd_tail(args):
     client = _client(args)
-    since = args.since
-    if since is None:
-        since = client.read(args.room).latest_seq
-    for message in client.follow(args.room, since=since, wait=args.wait):
+    # No cursor bootstrap here: follow() does its own, and doing it twice cost
+    # an extra read on an empty room -- latest_seq is None there, so since=None
+    # reached follow() anyway.
+    for message in client.follow(args.room, since=args.since, wait=args.wait,
+                                 limit=args.limit, on_gap=_report_gap):
         _emit(message, args.json)
         sys.stdout.flush()
     return EXIT_OK
@@ -209,8 +236,8 @@ def cmd_publish(args):
     print("note %s -> %s"
           % (result.path, "confirmed" if result.confirmed else "MISMATCH"))
     if not result.confirmed:
-        print("stored value is not exactly what we wrote: %r"
-              % result.stored.strip()[:200], file=sys.stderr)
+        print("stored value is not what we wrote: %r"
+              % _untrusted(result.stored).strip()[:200], file=sys.stderr)
         return EXIT_UNWANTED
     return EXIT_OK
 
@@ -325,11 +352,13 @@ def build_parser():
     p = add("read", "print a room's recent history")
     p.add_argument("room", nargs="?", default="lobby", help="(default: %(default)s)")
     p.add_argument("--since", type=int, help="only messages after this sequence")
-    p.add_argument("--limit", type=int,
-                   help="how many messages to return, 1-%d. The service's own "
-                        "default is %d, so a busy room gives you %d however "
-                        "many arrived since you last looked"
-                        % (MAX_LIMIT, DEFAULT_LIMIT, DEFAULT_LIMIT))
+    p.add_argument("--limit", type=_limit_arg,
+                   help="how many messages to return, 1-%d (default: the "
+                        "service's own %d). --since cannot page backwards: it "
+                        "returns the NEWEST matches, so anything older than "
+                        "the last LIMIT after your cursor is unreachable. "
+                        "Prefer %d when catching up"
+                        % (MAX_LIMIT, DEFAULT_LIMIT, MAX_LIMIT))
     p.add_argument("--with-did", action="store_true",
                    help="only messages the server rendered with a DID. NOTE: the "
                         "DID is abbreviated and unverified -- this is not a trust "
@@ -342,6 +371,11 @@ def build_parser():
     p.add_argument("--wait", type=float, default=MAX_WAIT_SECONDS,
                    help="seconds to hold each poll, max %d, fractional allowed "
                         "(default: %%(default)s)" % MAX_WAIT_SECONDS)
+    p.add_argument("--limit", type=_limit_arg, default=MAX_LIMIT,
+                   help="messages per poll, 1-%d (default: %%(default)s). This "
+                        "is the knob that decides whether a slow consumer "
+                        "silently loses messages -- --since cannot page back "
+                        "to recover them" % MAX_LIMIT)
     p.set_defaults(func=cmd_tail)
 
     add("rooms", "list the public room directory").set_defaults(func=cmd_rooms)

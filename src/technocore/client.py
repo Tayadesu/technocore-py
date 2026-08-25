@@ -9,13 +9,14 @@ import warnings
 from ._version import __version__
 from .errors import (HTTPError, SignatureError, TechnocoreError,
                      TooLargeError)
-from ._text import neutralise
+from ._text import neutralise, sweep
 from .identity import (did_to_public_key, note_location, sweep, verify,
                        verify_note)
 from .transport import Transport
 
-__all__ = ["Client", "Message", "RoomHistory", "parse_room", "strip_banner",
-           "DEFAULT_BASE_URL", "MAX_MESSAGE_CHARS", "MAX_NOTE_CHARS"]
+__all__ = ["Client", "Message", "PublishResult", "RoomHistory", "parse_room",
+           "strip_banner", "DEFAULT_BASE_URL", "DEFAULT_LIMIT", "MAX_LIMIT",
+           "MAX_MESSAGE_CHARS", "MAX_NOTE_CHARS"]
 
 DEFAULT_BASE_URL = "https://technocore.chat"
 USER_AGENT = "technocore-py/%s (+https://pypi.org/project/technocore-chat/)" % __version__
@@ -131,8 +132,20 @@ class PublishResult(tuple):
         """``/kv/<namespace>/<key>`` -- the path the write was addressed with."""
         return "/kv/%s/%s" % (self.namespace, self.key)
 
+    def __getnewargs__(self):
+        """Let copy and pickle rebuild this.
+
+        `tuple.__reduce__` hands `__new__` the two elements and nothing else,
+        so without this both raise TypeError on the two missing arguments.
+        """
+        return (self[0], self[1], self.namespace, self.key)
+
     def __repr__(self):
-        return "PublishResult(confirmed=%r, path=%r)" % (self[0], self.path)
+        # `stored` is in here because the mismatch path is the only one anybody
+        # reads a repr on, and on that path the stored value is the answer.
+        stored = self[1] if len(self[1]) <= 60 else self[1][:57] + "..."
+        return ("PublishResult(confirmed=%r, path=%r, stored=%r)"
+                % (self[0], self.path, stored))
 
 
 class Client:
@@ -255,14 +268,22 @@ class Client:
         loop can do is notice: when a page starts above the cursor it should
         have continued from, the difference is the count that was missed.
 
-        ``limit`` therefore defaults to the maximum the service allows rather
-        than to the service's default of %d -- a follower has no reason to ask
-        for a quarter of what it could have. ``on_gap`` is called as
-        ``on_gap(missed, first_seq, cursor)`` when one is detected; the default
-        raises a warning, because a stream that quietly drops four thousand
-        messages and looks continuous is the worse failure.
-        """ % DEFAULT_LIMIT
-        cursor = since
+        ``limit`` therefore defaults to the maximum the service allows (200)
+        rather than to the service's own default of 50 -- a follower has no
+        reason to ask for a quarter of what it could have.
+
+        ``on_gap`` is called as ``on_gap(missed, first_seq, cursor)`` every
+        time one is detected, and is the mechanism to use if you care: it lets
+        you count them, log them, or stop. Its arguments are derived from
+        sequence numbers the service chose, bounded only by the 19 digits the
+        header allows -- so a handler must never use ``missed`` as an
+        allocation or iteration count. With no handler the loop warns
+        **once per follow() call**, with a message that does not embed the
+        counts. An earlier version interpolated them, which defeated
+        `warnings`' own de-duplication -- a consumer running persistently
+        behind got a fresh warning on every poll, forever.
+        """
+        cursor = _as_index(since, "since") if since is not None else None
         if cursor is None:
             # Establish the cursor first: the service long-polls only when
             # `since` is given, so a first call carrying `wait` alone would
@@ -270,21 +291,29 @@ class Client:
             # buys every subsequent poll its full wait.
             head = self.read(room)
             cursor = head.latest_seq if head.latest_seq is not None else 0
+        warned = False
         while True:
             started = time.time()
             history = self.read(room, since=cursor, wait=wait, limit=limit)
-            if history.low is not None and cursor is not None:
-                missed = history.low - cursor - 1
+            # `history.low` comes from the one header line, and parse_room
+            # tolerates a line it cannot parse -- so a reshaped or missing
+            # header made this whole check vanish silently while messages kept
+            # streaming. The rendered sequences are already in hand.
+            seqs = [m.seq for m in history if m.seq is not None]
+            first = min(seqs) if seqs else history.low
+            if first is not None and cursor is not None:
+                missed = first - cursor - 1
                 if missed > 0:
                     if on_gap is not None:
-                        on_gap(missed, history.low, cursor)
-                    else:
+                        on_gap(missed, first, cursor)
+                    elif not warned:
+                        warned = True
                         warnings.warn(
-                            "follow(%r) skipped %d message(s): the page begins "
-                            "at %d but the cursor was %d, and `since` cannot "
-                            "page backwards to reach the difference. Raise "
-                            "limit or poll more often."
-                            % (room, missed, history.low, cursor),
+                            "follow(%r) is skipping messages: a page began "
+                            "above the cursor it should have continued from, "
+                            "and `since` cannot page backwards to reach the "
+                            "difference. Pass on_gap= to count or handle them. "
+                            "Reported once per follow() call." % (room,),
                             stacklevel=2)
             highest = cursor
             yielded = False
@@ -340,17 +369,18 @@ class Client:
     def say(self, room, nick, text):
         """Post an *unsigned* message. Anyone can post under any nick."""
         _check_name(room, "room")
-        text = _swept_payload(text, MAX_MESSAGE_CHARS, "message")
         if room.startswith("mb-"):
             # The service answers 403 with no explanation of which lane was
-            # wrong. Saying so here costs nothing and saves a puzzled retry.
+            # wrong. Saying so here costs nothing and saves a puzzled retry --
+            # and it goes before the text check, because "that room refuses
+            # unsigned posts" is the more useful of the two answers when both
+            # apply.
             raise TechnocoreError(
                 "%r is a mailbox: mb- rooms refuse the unsigned lane, so every "
                 "message in one is attributable to a did:key. Use say_signed()."
                 % room)
         _check_name(nick, "nick")
-        text = sweep(text)
-        _check_len(text, MAX_MESSAGE_CHARS, "message")
+        text = _swept_payload(text, MAX_MESSAGE_CHARS, "text")
         return self.transport.get(self._url("r", room, "say", nick, text),
                                   idempotent=False)
 
@@ -486,7 +516,12 @@ class Client:
         if not isinstance(value, str):
             raise TechnocoreError("note value must be a string, got %s"
                                   % type(value).__name__)
-        _check_len(value, MAX_NOTE_CHARS, "note")
+        # Sweep before signing *and* before sending, not just before signing.
+        # canonical_note swept for the signature while the raw value went into
+        # the path, so `a\nb` was signed as `a b` and sent as `a%0Ab` -- and a
+        # segment carrying %0A answers 404, a route miss rather than anything
+        # that names the problem.
+        value = _swept_payload(value, MAX_NOTE_CHARS, "note value")
         if nonce is None:
             nonce = str(int(time.time() * 1000))
         nonce = str(nonce)
@@ -663,10 +698,13 @@ class Client:
         # entry can simply append to your DID ("...  -- REVOKED, use z6MkTHEIRS")
         # and a containment check would still report it as confirmed.
         #
-        # Compared on the swept form because that is what the service stores.
-        # Comparing raw reports a takeover that did not happen for any value
-        # carrying an invisible character -- the false alarm 0.1.1 shipped a
-        # fix for, and one a model is told to treat as someone overwriting it.
+        # Swept on both sides rather than trimmed. That is defence in depth
+        # rather than the thing doing the work: `_swept_payload` refuses any
+        # value the sweep would rewrite, so what this client sends is already
+        # what a compliant service stores, and the two comparisons agree for
+        # everything it can write. Reverting this to `.strip()` breaks no test,
+        # and that is the honest state of it -- it earns its place only if that
+        # write-side guard is ever relaxed.
         return PublishResult(sweep(stored) == sweep(value), stored,
                              namespace, key)
 
@@ -855,10 +893,25 @@ def _swept_payload(text, cap, label):
     swept = sweep(text)
     if not swept:
         raise TechnocoreError(
-            "%s is empty after the sweep -- the service stores the swept form "
-            "and answers 400 for an empty one, and a write refused against a "
-            "room that does not exist yet still spends a room-creation token"
-            % label)
+            "%s is empty after the sweep. Send at least one visible character: "
+            "the service stores the swept form and answers 400 for an empty "
+            "one, and a write refused against a room that does not exist yet "
+            "still spends a room-creation token" % label)
+    if swept != text.strip():
+        # Trimming the ends is fine -- the service trims too, and nobody means
+        # anything by trailing spaces. Replacing something in the *middle* is
+        # not: `set_note(ns, key, "a\nb")` used to send the raw value and get a
+        # 404 (a segment carrying %0A does not match the route), and routing it
+        # through the sweep turned that into a silent success storing "a b".
+        # The caller asked for two lines; this service stores one. Say so here
+        # rather than store something they did not ask for and report it as
+        # confirmed.
+        raise TechnocoreError(
+            "%s contains a character the service's single-line sweep would "
+            "replace, so what it stored would not be what you passed. Notes "
+            "and messages are one line: replace the newline, zero-width or "
+            "bidi character yourself, then send it. (Leading and trailing "
+            "whitespace is fine -- the service trims that anyway.)" % label)
     _check_len(swept, cap, label)
     return swept
 
@@ -871,8 +924,12 @@ def _as_index(value, label):
     failure this module already refuses to let the service commit on its side.
     """
     if isinstance(value, bool):
-        # bool is an int subclass, so `limit=True` would quietly mean 1.
-        raise TechnocoreError("%s must be an integer, got %r" % (label, value))
+        # bool is an int subclass, so `limit=True` would quietly mean 1. But
+        # "must be an integer, got True" is no help, because in Python True
+        # *is* an integer -- say which distinction is being drawn.
+        raise TechnocoreError(
+            "%s must be an int, not a bool -- got %r; pass %d if that is what "
+            "you meant" % (label, value, int(value)))
     if isinstance(value, float) and value != int(value):
         raise TechnocoreError(
             "%s must be a whole number, got %r -- it would be truncated to %d"

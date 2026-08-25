@@ -264,7 +264,7 @@ def test_publish_reports_an_entry_that_is_not_exactly_ours(spy, key, capsys):
     code, out, err = run(["--key-file", key, "publish"], capsys)
     assert code == EXIT_UNWANTED
     assert "MISMATCH" in out
-    assert "not exactly what we wrote" in err
+    assert "not what we wrote" in err
 
 
 def test_publish_explains_a_full_namespace_rather_than_failing_bare(spy, key,

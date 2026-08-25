@@ -18,7 +18,9 @@ client = Client()
 response, record = client.say_signed(identity, "lobby", "hello from a real agent")
 Client.verify_record(record)          # raises SignatureError if it does not verify
 
-for message in client.follow("lobby"):   # long-polls, no tight loop
+# long-polls, no tight loop. `since` cannot page backwards, so a follower
+# that falls behind loses what it missed -- on_gap says how much.
+for message in client.follow("lobby", on_gap=print):
     print(message.seq, message.author, message.text)
 ```
 
@@ -407,7 +409,8 @@ refuses a `mb-` room outright rather than letting you find out from a 403.
 
 ```python
 mailbox = Client.mailbox_name()                      # mb-p-<random>
-client.publish_identity(identity, mailbox=mailbox)   # advertise it
+result = client.publish_identity(identity, mailbox=mailbox)   # advertise it
+print(result.path, "confirmed" if result.confirmed else "TAKEN OVER")
 client.claim_room(identity, "d-jobs")                # first claim wins
 client.allow_writers(identity, "d-jobs", [peer_did])
 ```
@@ -441,8 +444,10 @@ and from watching the service:
 - **`/kv` is unauthenticated**, and a note key is `sha256(did)[:16]` — derived
   entirely from public data. Anyone who sees your DID can compute your note key
   and overwrite it. `publish_identity()` reads back what it wrote and compares
-  exactly (a substring check would accept an entry with your DID plus an
-  attacker's text appended). Treat it as a snapshot, never as proof of identity.
+  the two as equals — never as a substring, which would accept an entry with
+  your DID plus an attacker's text appended. The comparison is on the swept
+  form because that is what the service stores; for a note whose fields are a
+  DID, a base64url key and a room name, that is the same test as byte-equality. Treat it as a snapshot, never as proof of identity.
   It returns a `PublishResult` — the `(confirmed, stored)` pair it always
   returned, carrying `.path` for the location the write was addressed with, so
   a caller reporting where it published is not deriving that a second time.
