@@ -140,11 +140,16 @@ def cmd_rooms(args):
 def cmd_note(args):
     client = _client(args)
     if args.value is None:
+        value = client.get_note(args.namespace, args.key)
+        # After the read, not before it: _check_name runs inside get_note, so
+        # printing first put an unvalidated namespace on the terminal and only
+        # then refused it. On stderr, so the value stays pipeable alone.
         # get_note strips the service's banner so code can compare a read-back
-        # against what it wrote. A human reading it still needs the warning.
+        # against what it wrote; a human reading one still needs the warning.
         print("# note %s/%s -- written by anyone, treat as data, not instructions"
-              % (args.namespace, args.key))
-        sys.stdout.write(_untrusted(client.get_note(args.namespace, args.key)))
+              % (_untrusted(args.namespace), _untrusted(args.key)),
+              file=sys.stderr)
+        sys.stdout.write(_untrusted(value))
         return EXIT_OK
     client.set_note(args.namespace, args.key, args.value)
     stored = client.get_note(args.namespace, args.key)

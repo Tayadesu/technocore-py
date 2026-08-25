@@ -381,15 +381,31 @@ _BANNER = "!! UNTRUSTED CONTENT"
 def strip_banner(body):
     """Remove the service's leading untrusted-content warning, if present.
 
-    Exact leading prefix only. The warning is worth keeping in anything shown
-    to a human or a model -- this package adds its own, stronger framing in
-    ``technocore.integrations`` -- but it is not part of the value, and code
-    comparing a value against what it wrote has to see the value.
+    Removes exactly two things: the banner line, and the blank line after it.
+    Nothing else, and only from the front.
+
+    Cutting at the first blank line *anywhere* looks equivalent and is not. If
+    the service ever separates with CRLF, or with a single newline, that cut
+    lands past an attacker's prefix and deletes it -- so a note reading
+    "REVOKED, use did:key:zEVIL" followed by a blank line and your DID strips
+    down to your DID and reports as yours. That is the one shape where the
+    attacker does better here than with no stripping at all, so the cut is
+    bound to the banner's own line instead.
     """
+    if not isinstance(body, str):
+        raise TechnocoreError("note body must be a string, got %s"
+                              % type(body).__name__)
     if not body.startswith(_BANNER):
         return body
-    _warning, separator, rest = body.partition("\n\n")
-    return rest if separator else body
+    line, separator, rest = body.partition("\n")
+    if not separator or "\n" in line:
+        return body
+    # The blank line the service puts between the warning and the value. A
+    # bare \r\n counts; anything else means this is not the shape we know.
+    for blank in ("\r\n", "\n"):
+        if rest.startswith(blank):
+            return rest[len(blank):]
+    return body
 
 
 def _opt_int(value):

@@ -2,8 +2,12 @@
 
 ## 0.1.1 — 2026-08-25
 
-Fixes a bug that made `publish_identity` and `technocore publish` report a note
-as someone else's when it was ours.
+Fixes a bug that made every read-back comparison in the package fail: three of
+them, not one. `publish_identity`, the `technocore note` write path, and the
+`technocore_write_note` tool all reported a note as someone else's when it was
+ours. The tool one is arguably worst: it told the model "DOES NOT match what we
+wrote", two lines below a comment warning that a model reading that will retry
+a rate-limited, irreversible write.
 
 The service prefixes note reads with its untrusted-content warning and a blank
 line. 0.1.0 compared the read-back against what it wrote using exact equality --
@@ -19,10 +23,18 @@ whose *value* mentions the same words is left alone. The exact comparison is
 unchanged, and tests pin both directions: our own note confirms, and an entry
 with text appended to our DID still fails.
 
-`technocore note <ns> <key>` prints its own warning line, since stripping the
-service's is for code that compares values, not for a human reading one.
+The cut is bound to the banner's own line rather than to the first blank line
+anywhere. Those look equivalent and are not: with a CRLF or single-newline
+separator, cutting at the first blank line lands past an attacker's prefix and
+deletes it, so a note reading "REVOKED, use did:key:zEVIL" would strip down to
+the victim's DID and confirm as theirs. That would have been worse than not
+stripping at all.
 
-Also exports `sweep`, `RoomHistory` and `strip_banner` from the top level.
+`technocore note <ns> <key>` prints its own warning line, on stderr and after
+the name is validated. Stripping the service's warning is for code comparing
+values; a human reading one still needs it.
+
+Also exports `strip_banner` from the top level.
 
 ## 0.1.0 — 2026-08-25
 

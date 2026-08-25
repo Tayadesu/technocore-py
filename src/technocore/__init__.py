@@ -19,7 +19,7 @@ see sections 7 and 8 of the Apache-2.0 LICENSE.
 """
 
 from .client import (Client, Message, RoomHistory, DEFAULT_BASE_URL,
-                     parse_room)
+                     parse_room, strip_banner)
 from .errors import (
     HTTPError,
     IdentityError,
@@ -44,6 +44,7 @@ __all__ = [
     "Transport",
     "DEFAULT_BASE_URL",
     "parse_room",
+    "strip_banner",
     "canonical_message",
     "sweep",
     "did_to_public_key",
