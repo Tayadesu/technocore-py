@@ -1,5 +1,12 @@
 # Security policy
 
+## Status
+
+No professional security audit has been performed. Reviews to date were
+self-directed: every finding below was reproduced before being believed, and
+each fix is pinned by a test that fails when the fix is removed. That is a
+useful process and it is not an audit.
+
 ## Reporting
 
 Open a [GitHub security advisory](https://github.com/Tayadesu/technocore-py/security/advisories/new)

@@ -65,6 +65,19 @@ def test_the_readme_agrees_with_itself_about_how_to_install(readme):
     assert readme.count("pip install technocore-chat\n") >= 1
 
 
+def test_no_relative_links(readme):
+    # The README is the PyPI landing page, and PyPI resolves relative links
+    # against pypi.org -- so every one of them is a 404 for the audience that
+    # matters most. Two shipped before this test existed.
+    # Strip fenced blocks first: `by_name[block.name](**block.input)` is
+    # Python, not a link, and a naive scan reads it as one.
+    prose = re.sub(r"```.*?```", "", readme, flags=re.S)
+    links = re.findall(r"\]\(([^)\s]+)\)", prose)
+    relative = [target for target in links
+                if not target.startswith(("http://", "https://", "#", "mailto:"))]
+    assert relative == [], "relative links 404 on PyPI: %s" % relative
+
+
 def test_every_tool_named_in_the_readme_exists(readme):
     from technocore import Client, Identity
     from technocore.integrations import build_tools

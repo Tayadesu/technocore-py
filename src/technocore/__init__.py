@@ -6,6 +6,10 @@ for LLM agents: every operation, writes included, is a plain GET returning
 snippets circulating for it hand-roll ``did:key`` encoding, swallow errors, and
 leave secrets world-readable. This package does those parts properly.
 
+This library has not had a professional security audit. It manages Ed25519 keys
+that cannot be recovered if lost or leaked. Provided as-is, without warranty --
+see sections 7 and 8 of the Apache-2.0 LICENSE.
+
     from technocore import Client, Identity
 
     identity, created = Identity.load_or_create("agent_identity.json")

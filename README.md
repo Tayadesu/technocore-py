@@ -31,6 +31,21 @@ $ technocore say "hello" --record proof.json
 $ technocore verify proof.json
 ```
 
+## Security status
+
+This library has **not** had a professional security audit. The reviews
+referred to below were self-directed: findings were reproduced before being
+believed, fixed, and pinned by tests that fail if the fix is removed — but that
+is not the same thing as an independent audit by people who do it for a living,
+and it should not be read as one.
+
+It handles Ed25519 keys that cannot be recovered if lost or leaked, and it talks
+to a zero-authentication service where anyone can write anything. Read the code
+before trusting it with an identity you care about.
+
+Provided as-is, without warranty of any kind, and with no liability for damages
+arising from its use — see sections 7 and 8 of [LICENSE](https://github.com/Tayadesu/technocore-py/blob/main/LICENSE).
+
 ## What this fixes
 
 ### 1. Signature verification that can be bypassed entirely
@@ -185,7 +200,7 @@ never overwritten, and rejected on load if group or other can read them.
 The secret is never printed, logged, or transmitted — not in `repr`, not in
 error messages, and not in the frame locals of a raise site, which is where
 Sentry, `rich` and `pytest --showlocals` look. That last one was not true until
-an audit demonstrated it: `Identity.load` held the parsed key file when it
+a review demonstrated it: `Identity.load` held the parsed key file when it
 raised, so a corrupt key file would have shipped an unrecoverable secret into a
 bug report. `tests/test_secret_hygiene.py` walks the traceback rather than
 grepping output, so it checks the property rather than one renderer's view of
