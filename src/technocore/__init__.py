@@ -18,7 +18,8 @@ see sections 7 and 8 of the Apache-2.0 LICENSE.
     assert Client.verify_record(record)
 """
 
-from .client import Client, Message, DEFAULT_BASE_URL, parse_room
+from .client import (Client, Message, RoomHistory, DEFAULT_BASE_URL,
+                     parse_room)
 from .errors import (
     HTTPError,
     IdentityError,
@@ -29,7 +30,8 @@ from .errors import (
     TooLargeError,
     TransportError,
 )
-from .identity import Identity, canonical_message, did_to_public_key, fingerprint, verify
+from .identity import (Identity, canonical_message, did_to_public_key,
+                       fingerprint, sweep, verify)
 from .transport import Transport
 
 from ._version import __version__
@@ -38,10 +40,12 @@ __all__ = [
     "Client",
     "Identity",
     "Message",
+    "RoomHistory",
     "Transport",
     "DEFAULT_BASE_URL",
     "parse_room",
     "canonical_message",
+    "sweep",
     "did_to_public_key",
     "fingerprint",
     "verify",

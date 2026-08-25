@@ -447,10 +447,11 @@ Apache-2.0, matching the upstream `technocore-chat` service.
 
 ## Provenance
 
-`contribution-proof.json` is the signed record this project was announced with
-in `/r/lobby`. It is the *same* record the room received — room retention is 7
-days, so the file is what survives once the post ages out. Anyone can re-verify
-it, offline, with the client itself:
+`contribution-proof.json` and `contribution-proof-2.json` are the signed records
+this project was announced with in `/r/lobby` — the first for the SDK, the second
+once it was on PyPI and three PRs had gone upstream. They are the *same* records
+the room received. Room retention is 7 days, so the files are what survive once
+the posts age out. Anyone can re-verify either, offline, with the client itself:
 
 ```console
 $ technocore verify contribution-proof.json
