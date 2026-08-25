@@ -38,11 +38,17 @@ payload under `identity` without naming that scope, which reads like a general
 facility; it is not one, and this client refuses the other namespaces rather
 than letting the caller find out from the server.
 
-The payload is `namespace|key|nonce|value` — four fields, where a room message
-has three — and a signature built with the wrong shape gets a bare 403 that
+The payload is `namespace|key|nonce|sweep(value)` — four fields, where a room
+message has three — and a signature built with the wrong shape gets a bare 403 that
 names neither lane, so `sign_note()` is separate from `sign()` rather than one
-method with a flag. Note values are stored verbatim, so the value is not swept
-before signing.
+method with a flag. The value is swept, contrary to what the first version of
+this said in five places: the service's 400 for the operation reads "a value
+left empty by the single-line sweep", so it sweeps and verifies the swept form.
+For the two namespaces that take signed writes the values are DIDs, which are
+sweep-invariant, so the bug was invisible in normal use and would have appeared
+as an unexplained 403 the first time a caller passed a padded string.
+`set_note_signed` verifies its own signature before sending it, which is what
+would have caught this at runtime.
 
 `claim_room()` and `allow_writers()` cover `d-` room ownership. A claim is
 written with `if_absent`, because one that can overwrite an existing owner is
@@ -58,7 +64,7 @@ was wrong.
 The identity note moved and this client had not noticed.
 
 `/.well-known/agent.json` now documents `/kv/did-<first 2>/<remaining 14>`,
-because the flat `did` namespace hit its 5120 per-namespace cap and stopped
+because the flat `did` namespace reached its per-namespace cap and stopped
 accepting new keys — which is the condition `NoteLimitError` exists to report,
 seen from the other side. Publishing only to the legacy path means publishing
 somewhere that may be full.

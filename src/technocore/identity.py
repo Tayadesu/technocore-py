@@ -26,7 +26,7 @@ from .errors import IdentityError, SignatureError
 
 __all__ = ["Identity", "canonical_message", "canonical_note", "sweep",
            "verify",
-           "did_to_public_key", "fingerprint", "note_location",
+           "did_to_public_key", "fingerprint", "note_location", "verify_note",
            "INVISIBLE_CATEGORIES"]
 
 _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -108,9 +108,19 @@ def canonical_message(room, nonce, text):
 def canonical_note(namespace, key, nonce, value):
     """The byte string the server verifies for a signed note write.
 
-    ``namespace|key|nonce|value`` -- four fields, where a room message has
-    three. The value is not swept: notes are stored verbatim, so the signature
-    covers exactly what was passed.
+    ``namespace|key|nonce|sweep(value)`` -- four fields, where a room message
+    has three.
+
+    The value *is* swept. An earlier version of this said the opposite, in the
+    code, the README, the changelog and the commit message, on the reasoning
+    that "notes are stored verbatim". The service's own 400 for this operation
+    reads "a value left empty by the single-line sweep", which only makes sense
+    if it sweeps -- and it stores and verifies the swept form, so signing the
+    raw one produces a bare 403 on any value with padding or an invisible
+    character. For the two namespaces that accept signed writes the values are
+    DIDs, which are sweep-invariant, so the bug was unobservable in normal use
+    and would have surfaced as an unexplained 403 the first time someone passed
+    a padded string.
     """
     for label, field in (("namespace", namespace), ("key", key),
                          ("nonce", nonce)):
@@ -119,10 +129,16 @@ def canonical_note(namespace, key, nonce, value):
     if not isinstance(value, str):
         raise SignatureError("value must be a string, got %s"
                              % type(value).__name__)
-    return ("%s|%s|%s|%s" % (namespace, key, nonce, value)).encode("utf-8")
+    swept = sweep(value)
+    if not swept:
+        raise SignatureError(
+            "value is empty after the sweep -- the service refuses that with "
+            "400 rather than storing an empty note")
+    return ("%s|%s|%s|%s" % (namespace, key, nonce, swept)).encode("utf-8")
 
 
-# "did:key:z" + base58(2 + 32 bytes) is 57 characters. The bound matters:
+# "did:key:z" + base58(2 + 32 bytes) is 56 characters (openapi pins
+# minLength == maxLength == 56). The bound matters:
 # _b58decode is quadratic in the input length, so an unbounded DID from a note
 # or a peer's record file is a cheap CPU sink (200k chars measured at ~7s).
 _MAX_DID_CHARS = 64
@@ -141,7 +157,7 @@ def did_to_public_key(did):
         raise SignatureError("not an Ed25519 did:key (expected %r prefix): %r"
                              % (_DID_PREFIX, did[:80]))
     if len(did) > _MAX_DID_CHARS:
-        raise SignatureError("did is %d characters; an Ed25519 did:key is 57"
+        raise SignatureError("did is %d characters; an Ed25519 did:key is 56"
                              % len(did))
     decoded = _b58decode(did[len(_DID_PREFIX):])
     if not decoded.startswith(_ED25519_MULTICODEC):
@@ -197,6 +213,21 @@ def verify(did, signature_b64u, room, nonce, text):
         public_key.verify(signature, canonical_message(room, nonce, text))
     except InvalidSignature:
         raise SignatureError("signature does not verify for %s" % did)
+    return True
+
+
+def verify_note(did, signature_b64u, namespace, key, nonce, value):
+    """Verify a signed note record. Returns True, or raises SignatureError."""
+    public_key = did_to_public_key(did)
+    signature = _b64u_decode(signature_b64u)
+    if len(signature) != 64:
+        raise SignatureError("expected a 64-byte Ed25519 signature, got %d bytes"
+                             % len(signature))
+    try:
+        public_key.verify(signature,
+                          canonical_note(namespace, key, nonce, value))
+    except InvalidSignature:
+        raise SignatureError("note signature does not verify for %s" % did)
     return True
 
 

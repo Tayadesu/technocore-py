@@ -11,6 +11,7 @@ import pytest
 
 from technocore import Client, Identity
 from technocore.errors import SignatureError, TechnocoreError
+from technocore import verify
 from technocore.identity import canonical_note
 
 
@@ -48,12 +49,64 @@ def test_an_unescaped_pipe_is_refused(field):
         canonical_note(**args)
 
 
-def test_the_note_value_is_not_swept():
-    # A room message is signed after the sweep, because that is what gets
-    # stored. Notes are stored verbatim, so sweeping one would sign something
-    # the server never sees.
-    padded = "  value with spaces  "
-    assert canonical_note("ns", "k", "1", padded).endswith(padded.encode())
+def test_the_note_value_is_swept_like_a_message():
+    # This test used to assert the opposite, and was the only thing that failed
+    # when the code was corrected -- a test pinning a falsehood about the
+    # protocol, which is worse than no test. The service's 400 for this
+    # operation reads "a value left empty by the single-line sweep", which only
+    # makes sense if it sweeps; it stores and verifies the swept form, so
+    # signing the raw one is a bare 403 waiting for the first padded value.
+    assert canonical_note("ns", "k", "1", "  padded  ").endswith(b"|padded")
+    assert canonical_note("ns", "k", "1", "a\u200bb").endswith(b"|a b")
+
+
+def test_a_value_that_sweeps_away_is_refused():
+    for value in ("", "   ", "\u200b", "\x01\u2028"):
+        with pytest.raises(SignatureError, match="empty after the sweep"):
+            canonical_note("ns", "k", "1", value)
+
+
+def test_the_signature_in_the_url_verifies_against_the_canonical_note():
+    # Nothing checked what set_note_signed actually signs. Two mutants
+    # survived on that: signing the message payload instead, and calling
+    # sign() instead of sign_note(). say_signed has verify_locally and
+    # verify_record; the note lane had neither.
+    from technocore.identity import verify_note
+
+    identity = Identity.generate()
+    spy = Spy()
+    _response, record = Client(transport=spy).set_note_signed(
+        identity, "room-owners", "d-jobs", "  padded value  ", nonce="9")
+    assert verify_note(record["did"], record["signature"], record["namespace"],
+                       record["key"], record["nonce"], record["value"])
+    # And the signature that went out is the one in the record.
+    assert record["signature"] in spy.urls[0][0]
+
+
+def test_the_note_signature_is_86_unpadded_base64url():
+    # openapi pins ^[A-Za-z0-9_-]{86}$; a mutant returning hex survived.
+    import re
+
+    signature = Identity.generate().sign_note("ns", "k", "1", "v")
+    assert re.match(r"^[A-Za-z0-9_-]{86}$", signature)
+
+
+def test_sign_note_is_not_sign_with_the_fields_shuffled():
+    # The old test compared sign_note("a","b","1","c") with sign("a","1","c"),
+    # which differ under the mutant too. Compare against what the mutant would
+    # produce instead.
+    from technocore.identity import canonical_message, canonical_note
+
+    identity = Identity.generate()
+    signature = identity.sign_note("ns", "k", "1", "v")
+    from technocore.identity import verify_note
+
+    assert verify_note(identity.did, signature, "ns", "k", "1", "v")
+    # The message-payload readings of the same four fields must not verify.
+    for room, nonce, text in [("k", "1", "v"), ("ns", "1", "v")]:
+        with pytest.raises(SignatureError):
+            verify(identity.did, signature, room, nonce, text)
+    assert canonical_note("ns", "k", "1", "v") != canonical_message("ns", "1", "v")
 
 
 # -- set_note_signed -----------------------------------------------------------
@@ -374,3 +427,142 @@ def test_resolve_identity_tolerates_a_trailing_newline():
     identity = Identity.generate()
     assert Client(transport=Spy([identity.did + "\n"])).resolve_identity(
         identity.did) == identity.did
+
+
+# -- mutants that survived the 0.1.3 audit ------------------------------------
+
+def test_if_absent_is_only_sent_when_asked():
+    # Sending it unconditionally makes the allow-list impossible to update:
+    # every write after the first is a 409.
+    spy = Spy()
+    Client(transport=spy).set_note_signed(Identity.generate(), "room-allow",
+                                          "d-jobs", "v", nonce="1")
+    assert "if_absent" not in spy.urls[0][0]
+
+
+def test_the_allow_list_is_updatable():
+    # allow_writers must not pass if_absent -- an allow-list you can only write
+    # once is not an allow-list.
+    identity, peer = Identity.generate(), Identity.generate()
+    spy = Spy(["1", "ok"])
+    Client(transport=spy).allow_writers(identity, "d-jobs", [peer.did])
+    assert "if_absent" not in spy.urls[-1][0]
+
+
+def test_the_allow_list_is_space_joined():
+    # Live room-allow notes are space-joined; a comma is silently a different
+    # value the service will not parse as a list.
+    a, b = Identity.generate(), Identity.generate()
+    spy = Spy(["1", "ok"])
+    _response, record = Client(transport=spy).allow_writers(
+        Identity.generate(), "d-jobs", [a.did, b.did])
+    assert record["value"] == "%s %s" % (a.did, b.did)
+    assert "," not in record["value"]
+
+
+def test_room_nonce_tolerates_the_trailing_newline_every_reply_has():
+    # Real note reads end with "\n". Without .strip() this returns None for
+    # every existing counter, and claim_room then signs nonce=1 into a live
+    # room -- a 403 the caller cannot tell from "you are not the owner".
+    assert Client(transport=Spy(["1787629771869\n"])).room_nonce("d-x") == \
+        1787629771869
+
+
+def test_only_d_rooms_have_an_allow_list():
+    spy = Spy()
+    for room in ["lobby", "meta", "p-x", "mb-p-x"]:
+        with pytest.raises(TechnocoreError, match="d- rooms"):
+            Client(transport=spy).allow_writers(Identity.generate(), room,
+                                                [Identity.generate().did])
+    assert spy.urls == []
+
+
+def test_an_empty_allow_list_is_refused():
+    # It would leave a trailing empty path segment, which the router does not
+    # match; openapi pins minLength 1 on the value.
+    with pytest.raises(TechnocoreError, match="cannot be empty"):
+        Client(transport=Spy(["1"])).allow_writers(Identity.generate(),
+                                                   "d-jobs", [])
+
+
+def test_a_note_whose_first_field_merely_contains_our_did_is_refused():
+    # The substitution check is on the *first field*, not containment and not
+    # a prefix. Two mutants survived on that distinction.
+    victim = Identity.generate()
+
+    class Embedded:
+        def get(self, url, idempotent=True):
+            # Attacker's DID first, victim's mentioned later.
+            return "%s note-about:%s" % (Identity.generate().did, victim.did)
+
+    assert Client(transport=Embedded()).resolve_identity(victim.did) is None
+
+
+def test_a_did_that_only_shares_a_prefix_is_refused():
+    victim = Identity.generate()
+    lookalike = victim.did[:30] + "0" * (len(victim.did) - 30)
+
+    class Prefixed:
+        def get(self, url, idempotent=True):
+            return lookalike
+
+    assert Client(transport=Prefixed()).resolve_identity(victim.did) is None
+
+
+def test_the_substitution_check_does_not_authenticate_the_other_fields():
+    # Documented limitation, pinned so the docs cannot drift back into
+    # claiming more than the code does: an attacker who writes the victim's
+    # DID first still gets their own x25519 and mailbox returned.
+    victim = Identity.generate()
+
+    class Grafted:
+        def get(self, url, idempotent=True):
+            return "%s x25519:ATTACKER mailbox:mb-p-attacker" % victim.did
+
+    resolved = Client(transport=Grafted()).resolve_identity(victim.did)
+    assert resolved is not None and "ATTACKER" in resolved, (
+        "if this now returns None, the check got stronger and the README's "
+        "caveat should be updated to match")
+
+
+def test_mailbox_name_refuses_a_guessable_or_non_mailbox_shape():
+    with pytest.raises(TechnocoreError, match="entropy"):
+        Client.mailbox_name(entropy_bytes=0)
+    with pytest.raises(TechnocoreError, match="entropy"):
+        Client.mailbox_name(entropy_bytes=4)
+    with pytest.raises(TechnocoreError, match="mb-"):
+        Client.mailbox_name(prefix="")
+    with pytest.raises(TechnocoreError, match="mb-"):
+        Client.mailbox_name(prefix="p-")
+
+
+def test_the_generated_mailbox_name_is_validated_as_a_room_name():
+    # A prefix that passes the mb- check can still produce an invalid room
+    # name; the guard that catches that survived every other assertion.
+    with pytest.raises(TechnocoreError):
+        Client.mailbox_name(prefix="MB-p-")          # uppercase
+    with pytest.raises(TechnocoreError):
+        Client.mailbox_name(prefix="mb-p-", entropy_bytes=64)   # over 48 chars
+
+
+def test_a_note_value_is_url_quoted():
+    # The value is free-form and goes into a path segment. Unquoted, a slash
+    # in it silently becomes extra segments and the write lands somewhere else.
+    spy = Spy()
+    Client(transport=spy).set_note_signed(Identity.generate(), "room-allow",
+                                          "d-jobs", "a/b c&d", nonce="1")
+    url = spy.urls[0][0]
+    assert url.endswith("/a%2Fb%20c%26d")
+    assert "/a/b" not in url
+
+
+def test_a_note_value_past_the_cap_never_reaches_the_service():
+    from technocore.client import MAX_NOTE_CHARS
+
+    spy = Spy()
+    with pytest.raises(TechnocoreError, match="caps"):
+        Client(transport=spy).set_note_signed(Identity.generate(),
+                                              "room-allow", "d-jobs",
+                                              "x" * (MAX_NOTE_CHARS + 1),
+                                              nonce="1")
+    assert spy.urls == []

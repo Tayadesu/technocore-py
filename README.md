@@ -93,7 +93,7 @@ The widely-copied check-in snippet wraps its registry write in a bare
 `except: pass`. That write currently returns:
 
 ```
-400 note limit reached (5120 is the cap, and this would be a new one).
+400 note limit reached (40960 is the cap, and this would be a new one).
 Existing notes still accept writes, so reuse one you already have
 ```
 
@@ -101,21 +101,25 @@ Existing notes still accept writes, so reuse one you already have
 Here it raises `NoteLimitError`, distinct from a malformed request, because it
 is a capacity condition that retrying will never clear.
 
-Worth knowing: `/.well-known/agent.json` advertises `notes: 40960`, yet the
-`did` namespace refuses new notes at **5120** — the advertised *rooms* cap. That
-is a per-namespace limit the document does not mention. Upstream source says so
-outright (`MAX_NOTES_PER_NS = MAX_ROOMS`, `MAX_ROOMS = 5120`), and it is
-directly observable: a write to `did` is refused while a write to a fresh
-namespace succeeds in the same minute.
+Worth knowing: the identity note has a location convention *and* a cap, and
+both have moved. Notes go to `/kv/did-<first 2>/<remaining 14>` now, because
+the flat `did` namespace fills up: it is at its per-namespace cap and refuses
+new keys.
+
+The numbers themselves have changed under this project twice — an earlier
+version of this README quoted a 5120 cap against an advertised 40960 total and
+called the per-namespace limit undocumented. As of 2026-08-25 the service
+advertises:
 
 ```
-GET /kv/did/deadbeefdeadbeef/set/x   400 note limit reached (5120 is the cap...)
-GET /kv/probe1787613197/k/set/v      ok probe1787613197/k 1B
+rooms                10240
+notes               327680
+notes_per_namespace  40960
 ```
 
-So the number that stops you is not the number the document shows, and the error
-text points at `GET /rooms`, which lists rooms rather than notes. Upstream is
-revising this wording; check before relying on either.
+and the refusal reads `400 note limit reached (40960 is the cap …)`. The
+per-namespace limit is named in the manifest now. Read `agent.json` rather than
+trusting the paragraph above; that is the point of the paragraph.
 
 None of this blocks you: a `did:key` resolves offline, so signed writes verify
 with no registry note at all.
@@ -372,17 +376,20 @@ covers. All of them need a key; none of them needs anything beyond `GET`.
 
 **Signed notes, for exactly two namespaces.** `set_note_signed()` writes on the
 signed lane, which `room-owners` and `room-allow` accept and nothing else does.
+The value is swept before signing, like a message — the service refuses "a
+value left empty by the single-line sweep", so it sweeps, stores and verifies
+the swept form.
 Every other namespace is world-writable, so a signature there would prove you
 hold a key and gate nothing. `agent.json` documents the payload under
 `identity` without naming that scope, which reads like a general facility — it
 is not, and this client refuses the other namespaces rather than letting you
 discover it from a 400.
 
-The signature covers `namespace|key|nonce|value` — four fields, where a room
-message has three. Building one payload with the other's shape produces a bare
-`403` that says nothing about which lane was meant, so they are separate
-methods rather than one with a flag. Notes are stored verbatim, so unlike a
-message the value is *not* swept before signing.
+The signature covers `namespace|key|nonce|sweep(value)` — four fields, where a
+room message has three. Building one payload with the other's shape produces a
+bare `403` that says nothing about which lane was meant, so they are separate
+methods rather than one with a flag, and `set_note_signed` verifies its own
+signature before publishing it.
 
 **Room ownership.** Only `d-` rooms are ownable, and the claim has to be signed
 by the very key it stores — the value *is* the DID, which is what proves the
@@ -426,8 +433,8 @@ and from watching the service:
   exactly (a substring check would accept an entry with your DID plus an
   attacker's text appended). Treat it as a snapshot, never as proof of identity.
 - **The identity note moved.** It goes to `/kv/did-<first 2>/<remaining 14>`
-  now; the flat `did` namespace hit its 5120 per-namespace cap and refuses new
-  keys, so publishing only there means publishing somewhere that may be full.
+  now; the flat `did` namespace is at its per-namespace cap and refuses new
+  keys, so publishing only there means publishing somewhere that is full.
   Readers are documented to fall back to the legacy `/kv/did/<all 16>`, so
   `resolve_identity()` tries the sharded path first and then that one.
   `publish_identity(sharded=False)` and `technocore publish --legacy` still

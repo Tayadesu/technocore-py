@@ -9,7 +9,8 @@ from ._version import __version__
 from .errors import (HTTPError, SignatureError, TechnocoreError,
                      TooLargeError)
 from ._text import neutralise
-from .identity import did_to_public_key, note_location, sweep, verify
+from .identity import (did_to_public_key, note_location, sweep, verify,
+                       verify_note)
 from .transport import Transport
 
 __all__ = ["Client", "Message", "RoomHistory", "parse_room", "strip_banner",
@@ -34,6 +35,9 @@ _LINE = re.compile(
 # An empty room renders "range None..0".
 _NONCE = re.compile(r"^\d{1,19}$")
 _B64URL = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
+# openapi pins these exactly.
+_DID_PATH = re.compile(r"^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$")
+_SIG_PATH = re.compile(r"^[A-Za-z0-9_-]{86}$")
 # The service applies one rule to <room>, <nick>, <ns> and <key>; only <text>
 # and <value> are free-form. Checking it here is not just a round trip saved:
 # a refused write still spends a room-creation token, so three typos can lock
@@ -368,6 +372,20 @@ class Client:
                 "use a value greater than the last one this key used."
                 % nonce[:40])
         signature = identity.sign_note(namespace, key, nonce, value)
+        # Both are spliced into the path unquoted, on the strength of being
+        # derived. Identity accepts any string for `did`, so "derived" is a
+        # convention rather than a guarantee, and the same reasoning that put
+        # a guard on the nonce applies here. openapi pins both shapes.
+        if not _DID_PATH.match(identity.did):
+            raise SignatureError(
+                "did is not the shape the service accepts in a path: %r"
+                % identity.did[:60])
+        if not _SIG_PATH.match(signature):
+            raise SignatureError("signature is not 86 unpadded base64url chars")
+        # Verify our own signature before publishing it, as say_signed does.
+        # This is what would have caught the note payload being built without
+        # the sweep, at runtime, on the first call.
+        verify_note(identity.did, signature, namespace, key, nonce, value)
         url = "%s/kv/%s/%s/set-signed/%s/%s/%s/%s" % (
             self.base_url,
             urllib.parse.quote(namespace, safe=""),
@@ -397,6 +415,15 @@ class Client:
         """
         import secrets
 
+        if entropy_bytes < 8:
+            raise TechnocoreError(
+                "entropy_bytes must be at least 8; a guessable name defeats "
+                "the point, and the service's advice for a spammed mailbox is "
+                "to mint a new one")
+        if "mb-" not in prefix:
+            raise TechnocoreError(
+                "a mailbox name must contain 'mb-', or the room takes unsigned "
+                "writes and is not a mailbox at all; got %r" % prefix)
         name = prefix + secrets.token_hex(entropy_bytes)
         _check_name(name, "mailbox name")
         return name
@@ -410,8 +437,15 @@ class Client:
         _check_name(room, "room")
         try:
             body = self.get_note("room-nonce", room)
-        except TechnocoreError:
-            return None
+        except HTTPError as exc:
+            if exc.status == 404:
+                return None          # no counter yet; the room is unclaimed
+            raise
+        # Anything else -- a 429, a 5xx, a timeout -- must not read as "no
+        # counter". claim_room would then sign nonce=1 against a live counter
+        # and get a 403 the caller cannot tell from "you are not the owner".
+        # The identical anti-pattern was fixed in resolve_identity, twelve
+        # lines below.
         body = body.strip()
         return int(body) if body.isdigit() else None
 
@@ -441,6 +475,16 @@ class Client:
         a stale nonce is rejected rather than applied out of order.
         """
         _check_name(room, "room")
+        if not room.startswith("d-"):
+            raise TechnocoreError(
+                "only d- rooms have an allow-list; %r is not one" % room)
+        dids = list(dids)
+        if not dids:
+            # An empty value leaves a trailing empty path segment, which the
+            # router does not match, and openapi pins minLength 1.
+            raise TechnocoreError(
+                "the allow-list cannot be empty; to close a room to everyone "
+                "but its owner, there is nothing to write")
         for did in dids:
             did_to_public_key(did)          # refuse a malformed list early
         if nonce is None:
