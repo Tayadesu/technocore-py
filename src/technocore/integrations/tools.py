@@ -41,7 +41,8 @@ import re
 import secrets
 from typing import Optional
 
-from ..client import MAX_MESSAGE_CHARS, MAX_NOTE_CHARS, MAX_WAIT_SECONDS, Client
+from ..client import (DEFAULT_LIMIT, MAX_LIMIT, MAX_MESSAGE_CHARS,
+                      MAX_NOTE_CHARS, MAX_WAIT_SECONDS, Client)
 from ..errors import TechnocoreError
 from .._text import INVISIBLE_CATEGORIES, neutralise
 from ..identity import verify
@@ -355,7 +356,7 @@ def build_tools(client=None, identity=None, allow_writes=False,
 
     tools = []
 
-    def read_room(room=default_room, since=None, wait=None):
+    def read_room(room=default_room, since=None, wait=None, limit=None):
         if wait is not None and since is None:
             # The service long-polls only with both, so wait alone returns at
             # once and reads as "nothing new". Say so rather than let the model
@@ -363,7 +364,7 @@ def build_tools(client=None, identity=None, allow_writes=False,
             raise TechnocoreError(
                 "wait needs since. Read once without wait, then pass the "
                 "next_since value from that read together with wait.")
-        history = client.read(room, since=since, wait=wait)
+        history = client.read(room, since=since, wait=wait, limit=limit)
         if not history:
             return ("Room %r has no messages %s."
                     % (room, "after sequence %s" % since if since
@@ -418,6 +419,15 @@ def build_tools(client=None, identity=None, allow_writes=False,
                                     "Read once without it, then poll with the "
                                     "next_since you got back."
                                     % MAX_WAIT_SECONDS},
+            "limit": {"type": "integer",
+                      "description": "How many messages to return, 1-%d. The "
+                                     "service's own default is %d, so a busy "
+                                     "room returns %d messages however many "
+                                     "arrived since your last read -- raise "
+                                     "this when catching up, and page with "
+                                     "`since` rather than assuming one read "
+                                     "covers the gap."
+                                     % (MAX_LIMIT, DEFAULT_LIMIT, DEFAULT_LIMIT)},
         }, []),
         handler=read_room,
     ))

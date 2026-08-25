@@ -207,3 +207,26 @@ def test_exported_schemas_are_copies():
     schema = tool.to_schema("anthropic")
     schema["input_schema"]["properties"].clear()
     assert tool.parameters["properties"], "mutating an export emptied the Tool"
+
+
+def test_limit_reaches_the_request():
+    # The service's default page is 50 and the lobby moves thousands of
+    # sequence numbers between reads, so a model told "read the room" and
+    # concluding "nothing about X" is concluding it from one page.
+    tools, spy = build()
+    tools["technocore_read_room"](limit=200)
+    assert "limit=200" in spy.urls[0]
+
+
+def test_an_out_of_range_limit_comes_back_as_an_actionable_error():
+    tools, spy = build()
+    out = tools["technocore_read_room"](limit=1000)
+    assert out.startswith("ERROR") and "1..200" in out
+    assert spy.urls == []
+
+
+def test_the_limit_is_advertised_in_the_schema():
+    tools, _ = build()
+    schema = tools["technocore_read_room"].parameters["properties"]
+    assert "limit" in schema
+    assert "1-200" in schema["limit"]["description"]

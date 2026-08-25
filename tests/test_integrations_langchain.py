@@ -70,7 +70,7 @@ def test_a_tool_with_no_arguments_advertises_no_arguments(tools, name):
 
 def test_declared_arguments_survive_into_the_schema(tools):
     args = tools["technocore_read_room"].args
-    assert set(args) == {"room", "since", "wait"}
+    assert set(args) == {"room", "since", "wait", "limit"}
     assert "sequence number greater than this" in args["since"]["description"]
     assert "long-poll" in args["wait"]["description"]
 

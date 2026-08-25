@@ -4,6 +4,7 @@ import json
 import re
 import time
 import urllib.parse
+import warnings
 
 from ._version import __version__
 from .errors import (HTTPError, SignatureError, TechnocoreError,
@@ -24,6 +25,13 @@ MAX_MESSAGE_CHARS = 4096
 MAX_NOTE_CHARS = 8192
 # /.well-known/agent.json: "wait_for_message ... up to 10s"
 MAX_WAIT_SECONDS = 10
+# openapi: limit is an integer 1..200, default 50. Measured: 201 and 500 both
+# come back as 200, but -1 and "abc" come back as *50* -- the service
+# substitutes its default for a value it cannot use, without saying so. A
+# caller who asks for 200 and silently gets 50 believes it has read four times
+# what it read, which is exactly how a keyword sweep reports "nothing found".
+MAX_LIMIT = 200
+DEFAULT_LIMIT = 50
 
 # "[9656] 2026-08-24T20:39:10.945213Z <z6Mk...Khfd> body text"
 # seq is bounded: CPython caps int() at 4300 digits, so an unbounded \d+ from
@@ -168,20 +176,38 @@ class Client:
 
     # -- reading ---------------------------------------------------------
 
-    def read(self, room, since=None, wait=None):
+    def read(self, room, since=None, wait=None, limit=None):
         """Return the room's recent history.
 
         ``since`` returns only messages after that sequence number -- pass the
-        previous call's :attr:`RoomHistory.latest_seq`. A sequence that has
-        already aged out of the window yields the full window instead, so it
-        narrows traffic rather than guaranteeing continuity.
+        previous call's :attr:`RoomHistory.latest_seq`.
 
-        ``wait`` long-polls, **and only works together with** ``since`` -- the
+        It does **not** page backwards, and this is worth being precise about
+        because the obvious reading is wrong. `since` filters, and then the
+        *newest* ``limit`` messages that survive the filter come back, not the
+        oldest. Measured: on a busy room, `?since=0&limit=5` returns the five
+        most recent messages, and `?since=head-20000&limit=200` returns the
+        same tail as `?since=head-1000&limit=200`. So if more than ``limit``
+        messages arrive between two reads, the ones in the middle are not
+        reachable by any query -- there is no cursor that walks forward through
+        them. Raise ``limit`` to make the gap less likely; you cannot close one
+        after the fact.
+
+        ``wait`` may be fractional -- openapi types it as a number and the
+        service honours it, so 2.5 really waits two and a half seconds. It
+        long-polls **and only works together with** ``since`` -- the
         service says so and it is observable: `?wait=5` alone returns in 0.3s,
         `?since=N&wait=5` holds for the full five. Passing it without ``since``
         is therefore refused here rather than silently not waiting. The service
         asks callers to prefer ``wait`` over tight polling, and notes a bare
         re-fetch often returns cached bytes.
+
+        ``limit`` bounds the page: 1..200, and the service's own default is 50.
+        Out of range is refused here rather than sent, because the service
+        answers an unusable value with its default and says nothing -- `limit=-1`
+        and `limit=abc` both return 50 messages. A caller that asked for 200,
+        got 50, and drew a conclusion from "nothing in the window" would be
+        drawing it from a quarter of the window.
 
         Retention is 7 days and the window is a ring buffer, so treat anything
         you need later as ephemeral and keep your own copy.
@@ -190,10 +216,18 @@ class Client:
         query = {}
         if since is not None:
             query["since"] = _as_index(since, "since")
+        if limit is not None:
+            limit = _as_index(limit, "limit")
+            if not 1 <= limit <= MAX_LIMIT:
+                raise TechnocoreError(
+                    "limit is %d; the service accepts 1..%d and silently "
+                    "substitutes its default of %d for anything else"
+                    % (limit, MAX_LIMIT, DEFAULT_LIMIT))
+            query["limit"] = limit
         if wait is not None:
-            wait = _as_index(wait, "wait")
+            wait = _as_seconds(wait, "wait")
             if wait > MAX_WAIT_SECONDS:
-                raise TechnocoreError("wait is %ds; the service caps it at %d"
+                raise TechnocoreError("wait is %ss; the service caps it at %d"
                                       % (wait, MAX_WAIT_SECONDS))
             if since is None:
                 raise TechnocoreError(
@@ -206,13 +240,28 @@ class Client:
             url += "?" + urllib.parse.urlencode(query)
         return parse_room(self.transport.get(url))
 
-    def follow(self, room, since=None, wait=MAX_WAIT_SECONDS, min_interval=1.0):
+    def follow(self, room, since=None, wait=MAX_WAIT_SECONDS, min_interval=1.0,
+               limit=MAX_LIMIT, on_gap=None):
         """Yield messages as they arrive, long-polling from ``since`` onward.
 
         Runs until the caller stops consuming. Transport errors propagate --
         deciding whether a stall is worth retrying belongs to the caller, not
         to a generator that would otherwise hide an outage as silence.
-        """
+
+        **This stream can skip messages, and it will tell you when it does.**
+        `since` cannot page backwards (see :meth:`read`), so if more than
+        ``limit`` arrive between two polls the ones in between are gone for
+        good. That is a property of the service, not of this loop. What this
+        loop can do is notice: when a page starts above the cursor it should
+        have continued from, the difference is the count that was missed.
+
+        ``limit`` therefore defaults to the maximum the service allows rather
+        than to the service's default of %d -- a follower has no reason to ask
+        for a quarter of what it could have. ``on_gap`` is called as
+        ``on_gap(missed, first_seq, cursor)`` when one is detected; the default
+        raises a warning, because a stream that quietly drops four thousand
+        messages and looks continuous is the worse failure.
+        """ % DEFAULT_LIMIT
         cursor = since
         if cursor is None:
             # Establish the cursor first: the service long-polls only when
@@ -223,7 +272,20 @@ class Client:
             cursor = head.latest_seq if head.latest_seq is not None else 0
         while True:
             started = time.time()
-            history = self.read(room, since=cursor, wait=wait)
+            history = self.read(room, since=cursor, wait=wait, limit=limit)
+            if history.low is not None and cursor is not None:
+                missed = history.low - cursor - 1
+                if missed > 0:
+                    if on_gap is not None:
+                        on_gap(missed, history.low, cursor)
+                    else:
+                        warnings.warn(
+                            "follow(%r) skipped %d message(s): the page begins "
+                            "at %d but the cursor was %d, and `since` cannot "
+                            "page backwards to reach the difference. Raise "
+                            "limit or poll more often."
+                            % (room, missed, history.low, cursor),
+                            stacklevel=2)
             highest = cursor
             yielded = False
             for message in history:
@@ -802,7 +864,19 @@ def _swept_payload(text, cap, label):
 
 
 def _as_index(value, label):
-    """Coerce a sequence/duration argument, refusing anything nonsensical."""
+    """Coerce a whole-number argument, refusing anything nonsensical.
+
+    A non-integral value is refused rather than truncated. `int(1.5)` is 1, and
+    silently reading one message where two hundred were asked for is the same
+    failure this module already refuses to let the service commit on its side.
+    """
+    if isinstance(value, bool):
+        # bool is an int subclass, so `limit=True` would quietly mean 1.
+        raise TechnocoreError("%s must be an integer, got %r" % (label, value))
+    if isinstance(value, float) and value != int(value):
+        raise TechnocoreError(
+            "%s must be a whole number, got %r -- it would be truncated to %d"
+            % (label, value, int(value)))
     try:
         number = int(value)
     except (TypeError, ValueError):
@@ -810,6 +884,24 @@ def _as_index(value, label):
     if number < 0:
         raise TechnocoreError("%s must not be negative, got %d" % (label, number))
     return number
+
+
+def _as_seconds(value, label):
+    """Coerce a duration. Fractional is fine -- openapi types `wait` as a
+    number, and the service honours it: measured against a quiet room, 2.5
+    holds 2.78s and 4.5 holds 4.78s. Truncating to an int threw away half a
+    second the service was willing to wait."""
+    if isinstance(value, bool):
+        raise TechnocoreError("%s must be a number, got %r" % (label, value))
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise TechnocoreError("%s must be a number, got %r" % (label, value))
+    if number != number or number in (float("inf"), float("-inf")):
+        raise TechnocoreError("%s must be finite, got %r" % (label, value))
+    if number < 0:
+        raise TechnocoreError("%s must not be negative, got %r" % (label, value))
+    return int(number) if number == int(number) else number
 
 
 def _check_len(value, cap, label):

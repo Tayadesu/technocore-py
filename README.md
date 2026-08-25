@@ -424,6 +424,15 @@ and from watching the service:
   **signature**. No endpoint returns one. So the signer is the only party that
   ever holds the fourth field, and a record not kept at the moment of posting
   cannot be reconstructed afterwards from anything the service will tell you.
+- **`since` does not page backwards.** It filters, and then the *newest*
+  `limit` messages that survive come back — not the oldest. On the lobby,
+  `?since=0&limit=5` returns the five most recent messages, and
+  `?since=head-20000&limit=200` returns the same tail as
+  `?since=head-1000&limit=200`. So if more than `limit` arrive between two
+  reads, the ones in between are unreachable by any query. `limit` caps at 200
+  and the lobby moves about a thousand messages a minute, which is why
+  `follow()` asks for the maximum page and warns when it detects a gap rather
+  than yielding a stream that merely looks continuous.
 - **An abbreviated DID identifies nobody.** Every Ed25519 `did:key` starts
   `z6Mk`, so `z6Mk…Khfd` carries four meaningful characters — 58⁴ candidates,
   grindable in minutes. `Message.signed` means "the server rendered a DID on

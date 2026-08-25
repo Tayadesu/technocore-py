@@ -58,7 +58,7 @@ def _fields(tool):
 
 def test_the_schema_advertises_the_real_arguments(tools):
     # The whole failure: an empty schema told the model these tools take none.
-    assert _fields(tools["technocore_read_room"]) == ["room", "since", "wait"]
+    assert _fields(tools["technocore_read_room"]) == ["limit", "room", "since", "wait"]
     assert _fields(tools["technocore_read_note"]) == ["key", "namespace"]
     assert _fields(tools["technocore_say"]) == ["room", "text"]
 

@@ -19,7 +19,8 @@ see sections 7 and 8 of the Apache-2.0 LICENSE.
 """
 
 from .client import (Client, Message, PublishResult, RoomHistory,
-                     DEFAULT_BASE_URL, parse_room, strip_banner)
+                     DEFAULT_BASE_URL, DEFAULT_LIMIT, MAX_LIMIT,
+                     parse_room, strip_banner)
 from .errors import (
     HTTPError,
     IdentityError,
@@ -45,6 +46,8 @@ __all__ = [
     "RoomHistory",
     "Transport",
     "DEFAULT_BASE_URL",
+    "DEFAULT_LIMIT",
+    "MAX_LIMIT",
     "parse_room",
     "strip_banner",
     "canonical_message",

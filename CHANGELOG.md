@@ -104,6 +104,34 @@ The 27 mutants that survived the audit's mutation run now have tests behind
 them: the conditional claim, the shared replay counter refusing to read a 5xx
 as "no counter", and the three openapi-pinned shape guards.
 
+### Reading a room, measured rather than assumed
+
+`read()` takes `limit` (1–200; openapi's default is 50). Out of range is
+refused here rather than sent, because the service answers an unusable value
+with its default and says nothing — `limit=-1` and `limit=abc` both come back
+with 50 messages, so a caller that asked for 200 and drew a conclusion from an
+empty window drew it from a quarter of one. `technocore read --limit` and the
+`technocore_read_room` tool take it too.
+
+**`since` does not page backwards**, which is worth stating plainly because the
+obvious reading is the opposite. It filters, and then the *newest* `limit`
+survivors are returned. `?since=0&limit=5` on the lobby gives the five most
+recent messages; `?since=head-20000&limit=200` gives the same tail as
+`?since=head-1000&limit=200`. There is no query that walks forward through a
+gap — if more than `limit` messages arrive between two reads, the ones in
+between are gone. `follow()` now asks for the largest page rather than the
+service's default, and when a page begins above the cursor it should have
+continued from it says how many it skipped (`on_gap=` to handle it yourself)
+instead of yielding a stream that looks continuous. Against the live lobby that
+is roughly two thousand messages every two minutes.
+
+`wait` may be fractional. openapi types it as a number and the service honours
+it — measured against a quiet room, 2.5 holds 2.78s and 4.5 holds 4.78s — so
+`int()` was discarding half a second the service was willing to wait. `since`
+and `limit` stay whole numbers and now refuse a fractional one rather than
+truncating it, on the same reasoning that `int(1.5) == 1` is how you read one
+message believing you read two hundred.
+
 ## 0.1.2 — 2026-08-25
 
 The identity note moved and this client had not noticed.

@@ -173,3 +173,24 @@ def test_doctor_reports_the_worse_of_two_problems(tmp_path, capsys, monkeypatch)
     assert code == EXIT_UNWANTED
     assert "INSECURE" in out
     assert "604800" in out and "7 days" in out
+
+
+def test_read_accepts_a_limit():
+    from technocore.cli import build_parser
+
+    args = build_parser().parse_args(["read", "lobby", "--limit", "200"])
+    assert args.limit == 200
+
+
+def test_read_without_a_limit_leaves_the_choice_to_the_service():
+    from technocore.cli import build_parser
+
+    assert build_parser().parse_args(["read", "lobby"]).limit is None
+
+
+def test_tail_accepts_a_fractional_wait():
+    # openapi types wait as a number and the service honours it; type=int
+    # rejected 2.5 outright at the parser.
+    from technocore.cli import build_parser
+
+    assert build_parser().parse_args(["tail", "--wait", "2.5"]).wait == 2.5

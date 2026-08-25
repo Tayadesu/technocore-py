@@ -182,3 +182,147 @@ def test_set_note_signed_does_not_claim_the_value_is_unswept():
     doc = Client.set_note_signed.__doc__
     assert "not** swept" not in doc and "stored verbatim" not in doc
     assert "swept" in doc
+
+
+# -- limit ------------------------------------------------------------------
+
+def test_limit_reaches_the_request():
+    spy = Spy("# room lobby  messages 0  range None..0")
+    Client(transport=spy).read("lobby", limit=200)
+    assert "limit=200" in spy.urls[0]
+
+
+def test_no_limit_means_no_parameter():
+    # The service's default is 50 and it is the service's to choose.
+    spy = Spy("# room lobby  messages 0  range None..0")
+    Client(transport=spy).read("lobby")
+    assert "limit" not in spy.urls[0]
+
+
+@pytest.mark.parametrize("limit", [0, 201, 500, 10 ** 9])
+def test_a_limit_outside_the_range_is_refused_rather_than_sent(limit):
+    # Measured: 201 and 500 come back as 200, but -1 and "abc" come back as
+    # *50* -- the service substitutes its default for an unusable value and
+    # says nothing. Asking for 200, getting 50, and concluding "nothing in the
+    # window" is a conclusion drawn from a quarter of the window.
+    spy = Spy()
+    with pytest.raises(TechnocoreError, match="1\\.\\.200"):
+        Client(transport=spy).read("lobby", limit=limit)
+    assert spy.urls == []
+
+
+@pytest.mark.parametrize("limit", [-1, "abc", 1.5, None.__class__])
+def test_a_nonsensical_limit_is_refused(limit):
+    spy = Spy()
+    with pytest.raises(TechnocoreError):
+        Client(transport=spy).read("lobby", limit=limit)
+    assert spy.urls == []
+
+
+# -- wait is a number, since and limit are not -------------------------------
+
+def test_a_fractional_wait_is_sent_as_written():
+    # openapi types wait as a number and the service honours it: measured
+    # against a quiet room, wait=2.5 holds 2.78s and wait=4.5 holds 4.78s.
+    # int() truncation threw away half a second the service would have waited.
+    spy = Spy("# room lobby  messages 0  range None..0")
+    Client(transport=spy).read("lobby", since=1, wait=2.5)
+    assert "wait=2.5" in spy.urls[0]
+
+
+def test_a_whole_float_wait_does_not_acquire_a_decimal_point():
+    spy = Spy("# room lobby  messages 0  range None..0")
+    Client(transport=spy).read("lobby", since=1, wait=3.0)
+    assert "wait=3&" in spy.urls[0] or spy.urls[0].endswith("wait=3")
+
+
+@pytest.mark.parametrize("wait", [float("nan"), float("inf"), -0.5, True, "x"])
+def test_a_wait_that_is_not_a_duration_is_refused(wait):
+    spy = Spy()
+    with pytest.raises(TechnocoreError):
+        Client(transport=spy).read("lobby", since=1, wait=wait)
+    assert spy.urls == []
+
+
+@pytest.mark.parametrize("field,value", [("since", 1.5), ("limit", 1.5),
+                                         ("since", True), ("limit", True)])
+def test_a_whole_number_field_refuses_truncation(field, value):
+    # int(1.5) is 1, and silently reading one message where two hundred were
+    # asked for is the same failure this module refuses to let the service
+    # commit on its side.
+    spy = Spy()
+    with pytest.raises(TechnocoreError, match="whole number|an integer"):
+        Client(transport=spy).read("lobby", **{field: value})
+    assert spy.urls == []
+
+
+# -- the gap `since` cannot close --------------------------------------------
+
+class Jumping:
+    """A room whose head runs far ahead of the cursor between polls."""
+
+    def __init__(self, stride=5000):
+        self.stride = stride
+        self.calls = 0
+        self.urls = []
+
+    def get(self, url, idempotent=True):
+        self.urls.append(url)
+        self.calls += 1
+        seq = 1000 + self.calls * self.stride
+        return "# room lobby  messages 1  range %d..%d\n[%d] t ~n hi" % (
+            seq, seq, seq)
+
+
+def test_follow_warns_about_the_messages_it_skipped():
+    # `since` filters and then returns the *newest* `limit` survivors, not the
+    # oldest -- measured: `?since=0&limit=5` gives the five most recent
+    # messages on a busy room. So a follower that falls behind cannot page
+    # forward through the difference; nothing can. The one thing this loop can
+    # do is not pretend the stream was continuous.
+    import warnings as _warnings
+
+    generator = Client(transport=Jumping()).follow("lobby", since=1000,
+                                                   min_interval=0)
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        next(generator)
+    assert len(caught) == 1
+    assert "skipped 4999" in str(caught[0].message)
+
+
+def test_a_gap_handler_replaces_the_warning():
+    import warnings as _warnings
+
+    seen = []
+    generator = Client(transport=Jumping()).follow(
+        "lobby", since=1000, min_interval=0,
+        on_gap=lambda missed, low, cursor: seen.append((missed, low, cursor)))
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        next(generator)
+    assert seen == [(4999, 6000, 1000)]
+    assert caught == []
+
+
+def test_a_continuous_stream_raises_nothing():
+    import warnings as _warnings
+
+    generator = Client(transport=Jumping(stride=1)).follow("lobby", since=1000,
+                                                           min_interval=0)
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        next(generator)
+    assert caught == []
+
+
+def test_follow_asks_for_the_largest_page_by_default():
+    # A follower has no reason to accept the service's default of 50 when it
+    # is the size of the page that decides whether a gap happens at all.
+    from technocore import MAX_LIMIT
+
+    spy = Jumping(stride=1)
+    generator = Client(transport=spy).follow("lobby", since=1000,
+                                             min_interval=0)
+    next(generator)
+    assert "limit=%d" % MAX_LIMIT in spy.urls[0]

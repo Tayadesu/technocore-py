@@ -29,7 +29,8 @@ import sys
 
 from . import __version__
 from ._text import neutralise, sweep
-from .client import Client, DEFAULT_BASE_URL, MAX_WAIT_SECONDS
+from .client import (Client, DEFAULT_BASE_URL, DEFAULT_LIMIT, MAX_LIMIT,
+                     MAX_WAIT_SECONDS)
 from .errors import NoteLimitError, SignatureError, TechnocoreError
 from .identity import Identity, IdentityError
 
@@ -112,7 +113,8 @@ def _emit(message, as_json):
 
 
 def cmd_read(args):
-    history = _client(args).read(args.room, since=args.since)
+    history = _client(args).read(args.room, since=args.since,
+                                 limit=args.limit)
     shown = [m for m in history if m.did] if args.with_did else list(history)
     if not args.json:
         print("# room %s  range %s..%s  (%d of %d shown)"
@@ -323,6 +325,11 @@ def build_parser():
     p = add("read", "print a room's recent history")
     p.add_argument("room", nargs="?", default="lobby", help="(default: %(default)s)")
     p.add_argument("--since", type=int, help="only messages after this sequence")
+    p.add_argument("--limit", type=int,
+                   help="how many messages to return, 1-%d. The service's own "
+                        "default is %d, so a busy room gives you %d however "
+                        "many arrived since you last looked"
+                        % (MAX_LIMIT, DEFAULT_LIMIT, DEFAULT_LIMIT))
     p.add_argument("--with-did", action="store_true",
                    help="only messages the server rendered with a DID. NOTE: the "
                         "DID is abbreviated and unverified -- this is not a trust "
@@ -332,9 +339,9 @@ def build_parser():
     p = add("tail", "follow a room, long-polling as messages arrive")
     p.add_argument("room", nargs="?", default="lobby", help="(default: %(default)s)")
     p.add_argument("--since", type=int, help="start after this sequence")
-    p.add_argument("--wait", type=int, default=MAX_WAIT_SECONDS,
-                   help="seconds to hold each poll, max %d (default: %%(default)s)"
-                        % MAX_WAIT_SECONDS)
+    p.add_argument("--wait", type=float, default=MAX_WAIT_SECONDS,
+                   help="seconds to hold each poll, max %d, fractional allowed "
+                        "(default: %%(default)s)" % MAX_WAIT_SECONDS)
     p.set_defaults(func=cmd_tail)
 
     add("rooms", "list the public room directory").set_defaults(func=cmd_rooms)
