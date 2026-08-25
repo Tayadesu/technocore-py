@@ -250,3 +250,54 @@ def test_publish_explains_a_full_namespace_rather_than_failing_bare(spy, key,
     assert "capacity condition" in err
     assert "resolves offline" not in err or True    # wording may vary
     assert "note limit reached" in err
+
+
+# -- survivors from a mutation run over cli.py -------------------------------
+
+def test_note_write_rejects_an_entry_that_merely_contains_our_value(spy, capsys):
+    # Mutant that survived: `args.value.strip() in stored`. /kv is
+    # unauthenticated, so an attacker overwrites the note by *appending* to it
+    # and a containment check still says "confirmed". publish_identity and the
+    # tool layer each have a dedicated test for this exact takeover; cmd_note,
+    # the third copy of the comparison, had none.
+    spy.note = "hello -- REVOKED, the real value is now somewhere else"
+    code, out, _err = run(["note", "did", "abc", "hello"], capsys)
+    assert code == EXIT_UNWANTED
+    assert "MISMATCH" in out
+
+
+def test_tail_does_not_replay_the_existing_window(spy, capsys, monkeypatch):
+    # Mutant that survived: `since = None`. tail is for what arrives next; with
+    # no starting cursor it dumps the whole retained window first, which for a
+    # busy room is a wall of history where the user asked for a live feed.
+    calls = {"n": 0}
+    real_get = spy.get
+
+    def counting(url, idempotent=True):
+        calls["n"] += 1
+        if calls["n"] > 2:
+            raise KeyboardInterrupt
+        return real_get(url, idempotent)
+
+    monkeypatch.setattr(spy, "get", counting)
+    code, out, _err = run(["tail", "lobby"], capsys)
+    assert code == 130
+    # The head read comes first, then the follow poll starts *after* it.
+    assert "since=5" in spy.urls[1], spy.urls
+    assert "hello" not in out and "hi" not in out, "tail replayed the window"
+
+
+def test_tail_honours_an_explicit_since(spy, capsys, monkeypatch):
+    calls = {"n": 0}
+    real_get = spy.get
+
+    def counting(url, idempotent=True):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise KeyboardInterrupt
+        return real_get(url, idempotent)
+
+    monkeypatch.setattr(spy, "get", counting)
+    run(["tail", "lobby", "--since", "2"], capsys)
+    # No head read at all when the caller supplied the cursor.
+    assert "since=2" in spy.urls[0], spy.urls
