@@ -137,7 +137,7 @@ class _FakeResponse:
     def __init__(self, body):
         self._body = body
 
-    def read(self):
+    def read(self, size=None):
         return self._body
 
     def __enter__(self):

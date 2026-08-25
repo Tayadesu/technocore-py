@@ -18,7 +18,7 @@ class _Response:
     def __init__(self, body=b"ok"):
         self._body = body
 
-    def read(self):
+    def read(self, size=None):
         return self._body
 
     def __enter__(self):

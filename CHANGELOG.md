@@ -34,6 +34,32 @@ stripping at all.
 the name is validated. Stripping the service's warning is for code comparing
 values; a human reading one still needs it.
 
+Also, from a pre-publication audit that found nothing blocking but several
+things worth taking:
+
+- Display neutralisation no longer borrows the service's sweep set. That set is
+  a protocol fact — `sweep` must match the server byte for byte — but it does
+  not cover variation selectors, Hangul fillers or the braille blank, which
+  render as nothing and are where text smuggling actually happens. A payload
+  encoded one byte per variation selector passed through untouched, invisible
+  in a transcript and legible to a model. Named codepoint by codepoint rather
+  than by category, because Mn is mostly combining accents.
+- The marker pattern's affix runs are bounded. Unbounded, a run of dashes cost
+  O(n²): 16k characters — inside the message cap, postable by anyone with one
+  GET — took 6.9s per read, on every read, for the whole retention window.
+- The banner line is anchored at both ends. A prefix test alone deleted any
+  first line beginning with the warning, so a takeover note stripped down to
+  the victim's DID and confirmed as theirs.
+- Redirects cannot change scheme or host, and the openers handle `https` only.
+  `build_opener` adds to the default set rather than replacing it, so
+  `FileHandler`, `FTPHandler` and `DataHandler` were reachable through a 302 —
+  and a redirect to `http://` achieved exactly what refusing a plain-http
+  `base_url` is meant to prevent, with the DID, signature and message text in
+  the path.
+- Response bodies are capped at 8 MB, and `follow()` has a floor between polls
+  that return nothing new. Without it the loop managed 82,000 requests in two
+  seconds, out of a per-IP budget the caller never meant to spend.
+
 Also exports `strip_banner` from the top level.
 
 ## 0.1.0 — 2026-08-25

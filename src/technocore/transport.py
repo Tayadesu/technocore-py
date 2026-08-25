@@ -26,14 +26,22 @@ import http.client
 import socket
 import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 
-from .errors import HTTPError, NoteLimitError, RateLimitError, TransportError
+from .errors import (HTTPError, NoteLimitError, RateLimitError,
+                     TooLargeError, TransportError)
 
 __all__ = ["Transport", "is_retryable"]
 
 # Ceiling on a server-supplied Retry-After, in seconds.
 MAX_RETRY_AFTER = 60.0
+
+#: Ceiling on a single response body. Every consumer processes the whole thing
+#: before any later bound applies -- parse_room regexes it, neutralise walks
+#: every character -- so the integrations layer's 16 KB truncation is the last
+#: step, not the first.
+MAX_BODY_BYTES = 8 * 1024 * 1024
 
 
 def is_retryable(status):
@@ -84,6 +92,42 @@ class _V4HTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(_V4HTTPSConnection, req, context=self._context)
 
 
+class _ConfinedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect that leaves the scheme or the host behind.
+
+    ``build_opener`` installs the stock redirect handler, which follows a 302
+    to ``http://`` or ``ftp://`` on any host. Client.__init__ refuses a plain
+    http base_url on the grounds that signed records would travel in cleartext
+    and the IPv4 pin would not apply -- and a redirect achieves exactly that,
+    with the DID, signature, nonce and message text in the path. The opener
+    that served the downgrade also gets latched as the working one.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlsplit(req.full_url)
+        new = urllib.parse.urlsplit(newurl)
+        if new.scheme != old.scheme or new.netloc != old.netloc:
+            raise urllib.error.HTTPError(
+                newurl, code,
+                "refused a redirect from %s to %s: this client does not follow "
+                "a redirect that changes scheme or host"
+                % (old.scheme + "://" + old.netloc, newurl[:120]),
+                headers, fp)
+        return urllib.request.HTTPRedirectHandler.redirect_request(
+            self, req, fp, code, msg, headers, newurl)
+
+
+def _opener(https_handler):
+    """An OpenerDirector that can do exactly one thing: https."""
+    director = urllib.request.OpenerDirector()
+    for handler in (https_handler,
+                    _ConfinedRedirectHandler(),
+                    urllib.request.HTTPErrorProcessor(),
+                    urllib.request.HTTPDefaultErrorHandler()):
+        director.add_handler(handler)
+    return director
+
+
 class Transport:
     """A tiny GET-only HTTP client with retries and typed errors.
 
@@ -101,10 +145,13 @@ class Transport:
         self.backoff = backoff
         self._sleep = sleep if sleep is not None else __import__("time").sleep
         context = ssl.create_default_context()
-        self._v4_opener = urllib.request.build_opener(_V4HTTPSHandler(context=context))
-        self._default_opener = urllib.request.build_opener(
-            urllib.request.HTTPSHandler(context=context)
-        )
+        # Built by hand, not with build_opener: build_opener *adds* to the
+        # default set, so FileHandler, FTPHandler and DataHandler stay in the
+        # chain and a redirect can reach them. This client speaks https and
+        # nothing else.
+        self._v4_opener = _opener(_V4HTTPSHandler(context=context))
+        self._default_opener = _opener(
+            urllib.request.HTTPSHandler(context=context))
         # Remembered after the first success so the fallback probe happens once.
         self._working_opener = None
 
@@ -151,9 +198,13 @@ class Transport:
             for opener in self._openers(idempotent):
                 try:
                     with opener.open(request, timeout=self.timeout) as response:
-                        body = response.read().decode("utf-8", "replace")
+                        raw = response.read(MAX_BODY_BYTES + 1)
+                    if len(raw) > MAX_BODY_BYTES:
+                        raise TooLargeError(
+                            "%s returned more than %d bytes; refusing to buffer "
+                            "it" % (url, MAX_BODY_BYTES))
                     self._working_opener = opener
-                    return body
+                    return raw.decode("utf-8", "replace")
                 except urllib.error.HTTPError as exc:
                     # HTTPError subclasses URLError, so this arm must come first.
                     # Reaching here means the server answered, so the opener works.

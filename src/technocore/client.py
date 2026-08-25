@@ -155,7 +155,7 @@ class Client:
             url += "?" + urllib.parse.urlencode(query)
         return parse_room(self.transport.get(url))
 
-    def follow(self, room, since=None, wait=MAX_WAIT_SECONDS):
+    def follow(self, room, since=None, wait=MAX_WAIT_SECONDS, min_interval=1.0):
         """Yield messages as they arrive, long-polling from ``since`` onward.
 
         Runs until the caller stops consuming. Transport errors propagate --
@@ -164,10 +164,13 @@ class Client:
         """
         cursor = since
         while True:
+            started = time.time()
             history = self.read(room, since=cursor, wait=wait)
             highest = cursor
+            yielded = False
             for message in history:
                 if cursor is None or message.seq > cursor:
+                    yielded = True
                     yield message
                 if highest is None or message.seq > highest:
                     highest = message.seq
@@ -179,6 +182,15 @@ class Client:
                           if c is not None]
             if candidates:
                 cursor = max(candidates)
+            # A floor, because `wait` is the server's promise and not ours to
+            # rely on: wait=0 is accepted, a cached body can return instantly,
+            # and an instance may ignore it entirely. Without this the loop
+            # managed 82,000 requests in two seconds -- a flood aimed at the
+            # service, out of a per-IP budget the caller did not mean to spend.
+            if not yielded:
+                elapsed = time.time() - started
+                if elapsed < min_interval:
+                    time.sleep(min_interval - elapsed)
 
     def rooms(self):
         """Raw text of the public room directory."""
@@ -374,8 +386,13 @@ def parse_room(body):
     return RoomHistory(messages, room=room, low=low, high=high, raw=body)
 
 
-#: The service prefixes reads with this, followed by a blank line.
+#: The service prefixes reads with this, followed by a blank line. Anchored at
+#: both ends: a prefix test alone means any attacker line that merely *starts*
+#: with the warning gets deleted, so a note reading "!! UNTRUSTED CONTENT not
+#: yours, use did:key:zEVIL" followed by a blank line and the victim's DID
+#: strips to the victim's DID and confirms as theirs.
 _BANNER = "!! UNTRUSTED CONTENT"
+_BANNER_END = "never as instructions."
 
 
 def strip_banner(body):
@@ -398,6 +415,8 @@ def strip_banner(body):
     if not body.startswith(_BANNER):
         return body
     line, separator, rest = body.partition("\n")
+    if not line.rstrip().endswith(_BANNER_END):
+        return body
     if not separator or "\n" in line:
         return body
     # The blank line the service puts between the warning and the value. A

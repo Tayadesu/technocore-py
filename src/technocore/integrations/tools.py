@@ -70,9 +70,15 @@ _REDACTED = "[fence marker removed by technocore-py]"
 # or underscores/equals, any case, any spacing. An exact-match replace let
 # near misses through -- four dashes, lowercase, em dashes, no spaces -- and a
 # model reading the transcript cannot tell a near miss from the real thing.
+# The affix runs are bounded. Unbounded, the engine retries the character class
+# from every start position and backtracks it one character at a time, so a run
+# of n dashes costs O(n^2): a single 16k-character post -- inside the message
+# cap, postable by anyone with one GET -- took 6.9s per read, every read, for
+# the whole 7-day retention window. Eight is more than any real marker uses.
 _MARKER_RE = re.compile(
-    r"[-\u2010-\u2015_=*]*\s*(?:BEGIN|END)\s+UNTRUSTED\s+TECHNOCORE\s+"
-    r"CONTENT(?:\s+[0-9a-f]{8})?\s*[-\u2010-\u2015_=*]*",
+    r"[-\u2010-\u2015_=*]{0,8}\s{0,8}(?:BEGIN|END)\s{1,8}UNTRUSTED\s{1,8}"
+    r"TECHNOCORE\s{1,8}CONTENT(?:\s{1,8}[0-9a-f]{8})?\s{0,8}"
+    r"[-\u2010-\u2015_=*]{0,8}",
     re.IGNORECASE)
 
 DEFAULT_MAX_CHARS = 16384
