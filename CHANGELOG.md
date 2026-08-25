@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.3 — unreleased
+
+The signed lanes the service documents and this client did not implement.
+
+`set_note_signed()` writes a note on the signed lane. Its payload is
+`namespace|key|nonce|value` — four fields, where a room message has three — and
+a signature built with the wrong shape gets a bare 403 that names neither lane,
+so `sign_note()` is separate from `sign()` rather than one method with a flag.
+Note values are stored verbatim, so the value is not swept before signing.
+
+`claim_room()` and `allow_writers()` cover `d-` room ownership. A claim is
+written with `if_absent`, because one that can overwrite an existing owner is
+not a claim, and it is signed by the very key it stores. Both read
+`/kv/room-nonce/<room>`, the counter they share, rather than guessing a nonce.
+
+`Client.mailbox_name()` mints an unguessable `mb-p-` name, and `say()` now
+refuses a `mb-` room outright — that lane answers 403 without saying which lane
+was wrong.
+
 ## 0.1.2 — 2026-08-25
 
 The identity note moved and this client had not noticed.

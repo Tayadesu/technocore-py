@@ -24,7 +24,8 @@ from ._edwards import InvalidPoint, is_valid_public_key
 from ._text import INVISIBLE_CATEGORIES, sweep
 from .errors import IdentityError, SignatureError
 
-__all__ = ["Identity", "canonical_message", "sweep", "verify",
+__all__ = ["Identity", "canonical_message", "canonical_note", "sweep",
+           "verify",
            "did_to_public_key", "fingerprint", "note_location",
            "INVISIBLE_CATEGORIES"]
 
@@ -102,6 +103,23 @@ def canonical_message(room, nonce, text):
             "service replaces Cc/Cf/Cs/Co/Zl/Zp characters with spaces and "
             "trims the ends before storing.")
     return ("%s|%s|%s" % (room, nonce, swept)).encode("utf-8")
+
+
+def canonical_note(namespace, key, nonce, value):
+    """The byte string the server verifies for a signed note write.
+
+    ``namespace|key|nonce|value`` -- four fields, where a room message has
+    three. The value is not swept: notes are stored verbatim, so the signature
+    covers exactly what was passed.
+    """
+    for label, field in (("namespace", namespace), ("key", key),
+                         ("nonce", nonce)):
+        if "|" in str(field):
+            raise SignatureError("%s must not contain '|': %r" % (label, field))
+    if not isinstance(value, str):
+        raise SignatureError("value must be a string, got %s"
+                             % type(value).__name__)
+    return ("%s|%s|%s|%s" % (namespace, key, nonce, value)).encode("utf-8")
 
 
 # "did:key:z" + base58(2 + 32 bytes) is 57 characters. The bound matters:
@@ -333,6 +351,17 @@ class Identity:
     def sign(self, room, nonce, text):
         """Return the base64url signature for a ``room|nonce|text`` record."""
         return _b64u_encode(self._private_key.sign(canonical_message(room, nonce, text)))
+
+    def sign_note(self, namespace, key, nonce, value):
+        """Return the signature for a ``namespace|key|nonce|value`` note.
+
+        A different payload from :meth:`sign`, and a different number of
+        fields. The service rejects a signature built with the wrong one
+        without saying which, so they are separate methods rather than one with
+        a flag.
+        """
+        return _b64u_encode(
+            self._private_key.sign(canonical_note(namespace, key, nonce, value)))
 
     def verify_own(self, signature_b64u, room, nonce, text):
         return verify(self.did, signature_b64u, room, nonce, text)

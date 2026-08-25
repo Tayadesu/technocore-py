@@ -4,4 +4,4 @@ It lived in three places -- pyproject, __init__, and the User-Agent string --
 and the third was already drifting.
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"

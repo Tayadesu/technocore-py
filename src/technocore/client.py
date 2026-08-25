@@ -8,7 +8,7 @@ import urllib.parse
 from ._version import __version__
 from .errors import SignatureError, TechnocoreError, TooLargeError
 from ._text import neutralise
-from .identity import note_location, sweep, verify
+from .identity import did_to_public_key, note_location, sweep, verify
 from .transport import Transport
 
 __all__ = ["Client", "Message", "RoomHistory", "parse_room", "strip_banner",
@@ -220,6 +220,13 @@ class Client:
     def say(self, room, nick, text):
         """Post an *unsigned* message. Anyone can post under any nick."""
         _check_name(room, "room")
+        if room.startswith("mb-"):
+            # The service answers 403 with no explanation of which lane was
+            # wrong. Saying so here costs nothing and saves a puzzled retry.
+            raise TechnocoreError(
+                "%r is a mailbox: mb- rooms refuse the unsigned lane, so every "
+                "message in one is attributable to a did:key. Use say_signed()."
+                % room)
         _check_name(nick, "nick")
         text = sweep(text)
         _check_len(text, MAX_MESSAGE_CHARS, "message")
@@ -310,6 +317,118 @@ class Client:
         _check_len(value, MAX_NOTE_CHARS, "note")
         return self.transport.get(self._url("kv", namespace, key, "set", value),
                                   idempotent=False)
+
+    def set_note_signed(self, identity, namespace, key, value, nonce=None,
+                        if_absent=False):
+        """Write a note on the signed lane.
+
+        The signature covers ``namespace|key|nonce|value`` -- a different
+        payload from a room message, which is ``room|nonce|text``. Getting the
+        two confused produces a signature the server rejects with no
+        explanation of why.
+
+        ``if_absent=True`` makes the write conditional on the key not already
+        existing, which is what a room-ownership claim needs: whoever gets
+        there first owns it, and a later claim must not silently win.
+
+        Unlike a room message, the value is **not** swept -- notes are stored
+        verbatim -- so the signature covers exactly what you passed.
+        """
+        _check_name(namespace, "namespace")
+        _check_name(key, "key")
+        if not isinstance(value, str):
+            raise TechnocoreError("note value must be a string, got %s"
+                                  % type(value).__name__)
+        _check_len(value, MAX_NOTE_CHARS, "note")
+        if nonce is None:
+            nonce = str(int(time.time() * 1000))
+        nonce = str(nonce)
+        if not _NONCE.match(nonce):
+            raise SignatureError(
+                "nonce must be 1-19 digits, got %r. For notes the counter is "
+                "server-written at /kv/room-nonce/<room>, and each write must "
+                "use a value greater than the last one this key used."
+                % nonce[:40])
+        signature = identity.sign_note(namespace, key, nonce, value)
+        url = "%s/kv/%s/%s/set-signed/%s/%s/%s/%s" % (
+            self.base_url,
+            urllib.parse.quote(namespace, safe=""),
+            urllib.parse.quote(key, safe=""),
+            identity.did,
+            signature,
+            nonce,
+            urllib.parse.quote(value, safe=""),
+        )
+        if if_absent:
+            url += "?if_absent=1"
+        response = self.transport.get(url, idempotent=False)
+        return response, {"did": identity.did, "namespace": namespace,
+                          "key": key, "nonce": nonce, "value": value,
+                          "signature": signature}
+
+    @staticmethod
+    def mailbox_name(prefix="mb-p-", entropy_bytes=8):
+        """An unguessable mailbox room name.
+
+        ``mb-p-`` is the usual choice: ``mb-`` makes the room refuse unsigned
+        writes, so every message is attributable to a key and a sender can be
+        ignored by key; ``p-`` keeps it out of the public directory, so it is
+        not enumerable. The service's own advice for a spammed mailbox is to
+        mint a new name and update the note -- which only works if the name was
+        not guessable to begin with.
+        """
+        import secrets
+
+        name = prefix + secrets.token_hex(entropy_bytes)
+        _check_name(name, "mailbox name")
+        return name
+
+    def room_nonce(self, room):
+        """The server-written replay counter shared by room-owners/room-allow.
+
+        Returns an int, or None if the room has no counter yet. The next write
+        must use a nonce greater than this.
+        """
+        _check_name(room, "room")
+        try:
+            body = self.get_note("room-nonce", room)
+        except TechnocoreError:
+            return None
+        body = body.strip()
+        return int(body) if body.isdigit() else None
+
+    def claim_room(self, identity, room, nonce=None):
+        """Claim ownership of a ``d-`` room. First claim wins.
+
+        Only ``d-`` rooms are ownable, and the claim must be signed by the very
+        key being stored -- the value *is* the DID, so the signature proves the
+        claimant holds it. Written with ``if_absent``, because a claim that can
+        overwrite an existing owner is not a claim.
+        """
+        _check_name(room, "room")
+        if not room.startswith("d-"):
+            raise TechnocoreError(
+                "only d- rooms are ownable; %r is not one. The classes are "
+                "p- unlisted, mb- mailbox, d- ownable, e- ephemeral." % room)
+        if nonce is None:
+            nonce = str((self.room_nonce(room) or 0) + 1)
+        return self.set_note_signed(identity, "room-owners", room,
+                                    identity.did, nonce=nonce, if_absent=True)
+
+    def allow_writers(self, identity, room, dids, nonce=None):
+        """Set the allow-list for a ``d-`` room. Owner's key only.
+
+        The nonce must be greater than the one the claim used: room-owners and
+        room-allow share ``/kv/room-nonce/<room>`` as their replay counter, so
+        a stale nonce is rejected rather than applied out of order.
+        """
+        _check_name(room, "room")
+        for did in dids:
+            did_to_public_key(did)          # refuse a malformed list early
+        if nonce is None:
+            nonce = str((self.room_nonce(room) or 0) + 1)
+        return self.set_note_signed(identity, "room-allow", room,
+                                    " ".join(dids), nonce=nonce)
 
     def publish_identity(self, identity, sharded=True, mailbox=None,
                          x25519=None):
