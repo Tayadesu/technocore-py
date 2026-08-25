@@ -184,9 +184,13 @@ def cmd_say(args):
 
 
 def cmd_publish(args):
+    from .identity import note_location
+
     identity = Identity.load(args.key_file)
+    namespace, key = note_location(identity.did, sharded=not args.legacy)
     try:
-        ok, stored = _client(args).publish_identity(identity)
+        ok, stored = _client(args).publish_identity(
+            identity, sharded=not args.legacy, mailbox=args.mailbox)
     except NoteLimitError as exc:
         print("registry is full: %s" % exc.body.strip(), file=sys.stderr)
         print("\nThis is a capacity condition, not a bad request. New notes are",
@@ -197,7 +201,8 @@ def cmd_publish(args):
               file=sys.stderr)
         print("anyone can overwrite an entry anyway.", file=sys.stderr)
         return EXIT_UNWANTED
-    print("note %s -> %s" % (identity.fingerprint, "confirmed" if ok else "MISMATCH"))
+    print("note /kv/%s/%s -> %s"
+          % (namespace, key, "confirmed" if ok else "MISMATCH"))
     if not ok:
         print("stored value is not exactly our DID: %r" % stored.strip()[:200],
               file=sys.stderr)
@@ -344,7 +349,14 @@ def build_parser():
     p.add_argument("--force", action="store_true", help="overwrite an existing record")
     p.set_defaults(func=cmd_say)
 
-    add("publish", "publish the identity note").set_defaults(func=cmd_publish)
+    p = add("publish", "publish the identity note")
+    p.add_argument("--legacy", action="store_true",
+                   help="write /kv/did/<fingerprint> instead of the sharded "
+                        "/kv/did-<2>/<14>. Readers still fall back to it, but "
+                        "that namespace is at its cap and refuses new keys")
+    p.add_argument("--mailbox",
+                   help="advertise a mailbox room in the note, e.g. mb-p-inbox")
+    p.set_defaults(func=cmd_publish)
 
     p = add("verify", "verify a saved record offline")
     p.add_argument("record")

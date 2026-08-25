@@ -101,13 +101,78 @@ def test_messages_over_the_server_cap_are_rejected_before_sending():
 
 
 def test_publish_identity_reads_back_what_it_wrote():
+    from technocore.identity import note_location
+
     identity = Identity.generate()
     transport = FakeTransport(["ok", identity.did])
     ok, _stored = Client(transport=transport).publish_identity(identity)
     assert ok
-    assert transport.urls[0].endswith("/kv/did/%s/set/%s"
-                                      % (identity.fingerprint,
+    namespace, key = note_location(identity.did)
+    assert transport.urls[0].endswith("/kv/%s/%s/set/%s"
+                                      % (namespace, key,
                                          identity.did.replace(":", "%3A")))
+
+
+def test_publish_identity_defaults_to_the_sharded_path():
+    # The flat `did` namespace hit its 5120 per-namespace cap and refuses new
+    # keys, which is why the service documents the split. Defaulting to the
+    # legacy path means defaulting to one that may be full.
+    identity = Identity.generate()
+    transport = FakeTransport(["ok", identity.did])
+    Client(transport=transport).publish_identity(identity)
+    assert "/kv/did-%s/" % identity.fingerprint[:2] in transport.urls[0]
+    assert "/kv/did/" not in transport.urls[0]
+
+
+def test_publish_identity_can_still_write_the_legacy_path():
+    identity = Identity.generate()
+    transport = FakeTransport(["ok", identity.did])
+    Client(transport=transport).publish_identity(identity, sharded=False)
+    assert "/kv/did/%s/" % identity.fingerprint in transport.urls[0]
+
+
+def test_the_two_paths_carry_the_same_fingerprint():
+    from technocore.identity import fingerprint, note_location
+
+    identity = Identity.generate()
+    sharded_ns, sharded_key = note_location(identity.did)
+    legacy_ns, legacy_key = note_location(identity.did, sharded=False)
+    assert sharded_ns[len("did-"):] + sharded_key == fingerprint(identity.did)
+    assert legacy_key == fingerprint(identity.did)
+    assert legacy_ns == "did"
+
+
+def test_the_note_can_carry_a_mailbox_and_an_x25519_key():
+    # The documented shape: "<did> x25519:<b64url> mailbox:mb-p-<name>".
+    identity = Identity.generate()
+    value = "%s x25519:AAAA mailbox:mb-p-inbox" % identity.did
+    transport = FakeTransport(["ok", value])
+    ok, stored = Client(transport=transport).publish_identity(
+        identity, x25519="AAAA", mailbox="mb-p-inbox")
+    assert ok and stored == value
+
+
+def test_resolve_identity_tries_the_sharded_path_first():
+    identity = Identity.generate()
+    transport = FakeTransport([identity.did])
+    assert Client(transport=transport).resolve_identity(identity.did) == identity.did
+    assert "/kv/did-%s/" % identity.fingerprint[:2] in transport.urls[0]
+
+
+def test_resolve_identity_falls_back_to_the_legacy_path():
+    # Documented behaviour: identities published before the convention changed
+    # are still findable.
+    identity = Identity.generate()
+    transport = FakeTransport(["", identity.did])
+    assert Client(transport=transport).resolve_identity(identity.did) == identity.did
+    assert len(transport.urls) == 2
+    assert "/kv/did/%s" % identity.fingerprint in transport.urls[1]
+
+
+def test_resolve_identity_returns_none_when_neither_exists():
+    identity = Identity.generate()
+    assert Client(transport=FakeTransport(["", ""])).resolve_identity(
+        identity.did) is None
 
 
 def test_publish_identity_reports_a_registry_entry_taken_over_by_someone_else():

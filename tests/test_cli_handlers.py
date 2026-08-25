@@ -234,7 +234,28 @@ def test_publish_confirms_when_the_entry_is_ours(spy, key, capsys):
     code, out, _err = run(["--key-file", key, "publish"], capsys)
     assert code == EXIT_OK
     assert "confirmed" in out
-    assert identity.fingerprint in spy.writes[0]
+    # The sharded path splits the fingerprint 2/14, so neither half alone is
+    # the whole thing -- check both pieces are in the URL.
+    assert "/kv/did-%s/%s/" % (identity.fingerprint[:2],
+                               identity.fingerprint[2:]) in spy.writes[0]
+
+
+def test_publish_writes_the_legacy_path_when_asked(spy, key, capsys):
+    identity = Identity.load(key)
+    spy.note = identity.did
+    code, out, _err = run(["--key-file", key, "publish", "--legacy"], capsys)
+    assert code == EXIT_OK
+    assert "/kv/did/%s/" % identity.fingerprint in spy.writes[0]
+    assert "confirmed" in out
+
+
+def test_publish_can_advertise_a_mailbox(spy, key, capsys):
+    identity = Identity.load(key)
+    spy.note = "%s mailbox:mb-p-inbox" % identity.did
+    code, out, _err = run(["--key-file", key, "publish",
+                           "--mailbox", "mb-p-inbox"], capsys)
+    assert code == EXIT_OK and "confirmed" in out
+    assert "mailbox%3Amb-p-inbox" in spy.writes[0]
 
 
 def test_publish_reports_an_entry_that_is_not_exactly_ours(spy, key, capsys):

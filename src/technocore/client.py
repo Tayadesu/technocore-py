@@ -8,7 +8,7 @@ import urllib.parse
 from ._version import __version__
 from .errors import SignatureError, TechnocoreError, TooLargeError
 from ._text import neutralise
-from .identity import sweep, verify
+from .identity import note_location, sweep, verify
 from .transport import Transport
 
 __all__ = ["Client", "Message", "RoomHistory", "parse_room", "strip_banner",
@@ -311,20 +311,57 @@ class Client:
         return self.transport.get(self._url("kv", namespace, key, "set", value),
                                   idempotent=False)
 
-    def publish_identity(self, identity):
-        """Publish ``did`` to ``/kv/did/<fingerprint>`` and read it back.
+    def publish_identity(self, identity, sharded=True, mailbox=None,
+                         x25519=None):
+        """Publish the identity note, and read it back.
 
-        ``/kv`` is unauthenticated and the fingerprint derives from the public
-        DID, so anybody can overwrite this entry. The read-back is the only way
-        to know the value is currently yours -- and it is a snapshot, not a
+        Goes to the sharded path the service documents,
+        ``/kv/did-<first 2>/<remaining 14>``. Pass ``sharded=False`` for the
+        legacy ``/kv/did/<all 16>``, which readers still fall back to -- that
+        namespace hit its 5120 per-namespace cap and refuses new keys, which is
+        why the convention changed.
+
+        ``mailbox`` and ``x25519`` are the optional extras the note may carry:
+        ``<did> x25519:<b64url> mailbox:mb-p-<name>``.
+
+        ``/kv`` is unauthenticated and the location derives from the public DID,
+        so anybody can overwrite this entry. The read-back is the only way to
+        know the value is currently yours -- and it is a snapshot, not a
         guarantee.
         """
-        self.set_note("did", identity.fingerprint, identity.did)
-        stored = self.get_note("did", identity.fingerprint)
+        namespace, key = note_location(identity.did, sharded=sharded)
+        value = identity.did
+        if x25519:
+            value += " x25519:%s" % x25519
+        if mailbox:
+            value += " mailbox:%s" % mailbox
+        self.set_note(namespace, key, value)
+        stored = self.get_note(namespace, key)
         # Exact match, not a substring test: an attacker who overwrites the
         # entry can simply append to your DID ("...  -- REVOKED, use z6MkTHEIRS")
         # and a containment check would still report it as confirmed.
-        return stored.strip() == identity.did, stored
+        return stored.strip() == value, stored
+
+    def resolve_identity(self, did):
+        """Read the identity note for ``did``, sharded path first.
+
+        The fallback order is the service's: the sharded location, then the
+        legacy one for identities published before the convention changed.
+        Returns the note text, or None if neither exists.
+
+        A note proves nothing on its own -- it is world-writable and derived
+        from public data. It tells you where to look; a signature tells you
+        who wrote something.
+        """
+        for sharded in (True, False):
+            namespace, key = note_location(did, sharded=sharded)
+            try:
+                value = self.get_note(namespace, key)
+            except TechnocoreError:
+                continue
+            if value.strip():
+                return value.strip()
+        return None
 
     # -- verification ----------------------------------------------------
 

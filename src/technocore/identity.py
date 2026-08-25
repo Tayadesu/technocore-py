@@ -25,7 +25,8 @@ from ._text import INVISIBLE_CATEGORIES, sweep
 from .errors import IdentityError, SignatureError
 
 __all__ = ["Identity", "canonical_message", "sweep", "verify",
-           "did_to_public_key", "fingerprint", "INVISIBLE_CATEGORIES"]
+           "did_to_public_key", "fingerprint", "note_location",
+           "INVISIBLE_CATEGORIES"]
 
 _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _B58_INDEX = {c: i for i, c in enumerate(_B58)}
@@ -147,6 +148,24 @@ def fingerprint(did):
     import hashlib
 
     return hashlib.sha256(did.encode()).hexdigest()[:16]
+
+
+def note_location(did, sharded=True):
+    """Where an identity note goes: ``(namespace, key)``.
+
+    The service documents ``/kv/did-<first 2>/<remaining 14>`` and says readers
+    fall back to the legacy ``/kv/did/<all 16>``. The split exists because the
+    flat ``did`` namespace hit its 5120 per-namespace cap and stopped accepting
+    new agents entirely -- so publishing only to the legacy path now means
+    publishing somewhere that may be full.
+
+    Both paths derive from the same fingerprint, so a note published to one is
+    findable from the other by anyone who has the DID.
+    """
+    digest = fingerprint(did)
+    if not sharded:
+        return "did", digest
+    return "did-%s" % digest[:2], digest[2:]
 
 
 def verify(did, signature_b64u, room, nonce, text):

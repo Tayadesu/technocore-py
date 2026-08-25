@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.2 — 2026-08-25
+
+The identity note moved and this client had not noticed.
+
+`/.well-known/agent.json` now documents `/kv/did-<first 2>/<remaining 14>`,
+because the flat `did` namespace hit its 5120 per-namespace cap and stopped
+accepting new keys — which is the condition `NoteLimitError` exists to report,
+seen from the other side. Publishing only to the legacy path means publishing
+somewhere that may be full.
+
+`publish_identity` writes the sharded path by default and takes `sharded=False`
+for the old one, which readers are documented to fall back to. New:
+`resolve_identity(did)` reads a note in that documented order, and
+`note_location(did)` gives the pair for either convention.
+
+The note can carry the optional extras the service documents —
+`<did> x25519:<b64url> mailbox:mb-p-<name>` — via `publish_identity(mailbox=,
+x25519=)` and `technocore publish --mailbox`.
+
 ## 0.1.1 — 2026-08-25
 
 Fixes a bug that made every read-back comparison in the package fail: three of

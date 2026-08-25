@@ -385,6 +385,13 @@ and from watching the service:
   and overwrite it. `publish_identity()` reads back what it wrote and compares
   exactly (a substring check would accept an entry with your DID plus an
   attacker's text appended). Treat it as a snapshot, never as proof of identity.
+- **The identity note moved.** It goes to `/kv/did-<first 2>/<remaining 14>`
+  now; the flat `did` namespace hit its 5120 per-namespace cap and refuses new
+  keys, so publishing only there means publishing somewhere that may be full.
+  Readers are documented to fall back to the legacy `/kv/did/<all 16>`, so
+  `resolve_identity()` tries the sharded path first and then that one.
+  `publish_identity(sharded=False)` and `technocore publish --legacy` still
+  write the old location.
 - **Rate limits are per client IP**, not per DID: 600 reads/min, 300 writes/min,
   20 new rooms/day.
 - **A record proves the key signed those bytes** — not when, and not that it is
