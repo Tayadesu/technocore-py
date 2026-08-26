@@ -31,6 +31,7 @@ READ_ONLY_ARGS = {
     "technocore_whoami": {},
     "technocore_say": {"text": "hello"},
     "technocore_write_note": {"namespace": "did", "key": "abc", "value": "v"},
+    "technocore_list_notes": {"namespace": "did"},
 }
 
 BODY = ("# room lobby  messages 1  range 4..4\n"

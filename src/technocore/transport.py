@@ -22,6 +22,7 @@ not change DNS behaviour for the rest of the host process, and it falls back to
 dual-stack.
 """
 
+import re
 import http.client
 import socket
 import ssl
@@ -29,8 +30,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .errors import (HTTPError, NoteLimitError, RateLimitError,
-                     TooLargeError, TransportError)
+from .errors import (ConflictError, HTTPError, NoteLimitError,
+                     RateLimitError, TooLargeError, TransportError)
 
 __all__ = ["Transport", "is_retryable"]
 
@@ -264,4 +265,37 @@ def _classify(status, body, url, headers=None):
     # helps, so callers need to be able to tell these apart.
     if status == 400 and "limit reached" in lowered:
         return NoteLimitError(status, body, url)
+    if status == 409:
+        current, existed = _parse_conflict(body)
+        return ConflictError(status, body, url, current, existed)
     return HTTPError(status, body, url)
+
+
+#: The 409 body ends with the note's current value, introduced by a line that
+#: states its length. The length is what makes this parseable: a value may
+#: itself contain the words "current value follows", and splitting on the
+#: marker alone would then take the wrong half.
+_CONFLICT_TAIL = re.compile(
+    r"current value follows \((\d+) chars?\):\n", re.IGNORECASE)
+
+
+def _parse_conflict(body):
+    """Pull the current value out of a 409, and say which condition failed.
+
+    Returns ``(current, existed)``. ``current`` is None when the body does not
+    carry one -- better than returning "" and having a caller write that over
+    somebody's note.
+    """
+    existed = None
+    if "already exists" in body.lower():
+        existed = True
+    elif "changed since you read it" in body.lower():
+        existed = False
+    match = _CONFLICT_TAIL.search(body)
+    if not match:
+        return None, existed
+    start = match.end()
+    length = int(match.group(1))
+    value = body[start:start + length]
+    # Trust the count over the remainder of the body, but not past its end.
+    return (value if len(value) == length else body[start:].rstrip("\n")), existed

@@ -59,6 +59,29 @@ class NoteLimitError(HTTPError):
     """
 
 
+class ConflictError(HTTPError):
+    """HTTP 409. A conditional write lost: the note was not in the state you
+    said it was.
+
+    ``current`` is the value the note holds *now*, which the service sends in
+    the body precisely so the loser can merge and retry -- "merge your change
+    into the value below, then write it with ?if=<that value> so you only win
+    if nothing moved again". It is ``None`` only if the body could not be
+    parsed, which would mean the service changed the shape of this response.
+
+    ``existed`` distinguishes the two conditions that produce a 409:
+    ``if_absent`` losing to a note that already exists, and ``if_value``
+    losing to a value that moved. A first-publish claim wants the first;
+    a read-modify-write loop wants the second, and retrying the first forever
+    is how you spend a rate-limit budget on a race you already lost.
+    """
+
+    def __init__(self, status, body, url, current=None, existed=None):
+        HTTPError.__init__(self, status, body, url)
+        self.current = current
+        self.existed = existed
+
+
 class RateLimitError(HTTPError):
     """HTTP 429. Limits are per client IP, not per DID."""
 

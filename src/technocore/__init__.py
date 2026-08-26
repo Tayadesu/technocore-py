@@ -22,6 +22,7 @@ from .client import (Client, Message, PublishResult, RoomHistory,
                      DEFAULT_BASE_URL, DEFAULT_LIMIT, MAX_LIMIT,
                      parse_room, strip_banner)
 from .errors import (
+    ConflictError,
     HTTPError,
     IdentityError,
     NoteLimitError,
@@ -60,6 +61,7 @@ __all__ = [
     "TechnocoreError",
     "TransportError",
     "HTTPError",
+    "ConflictError",
     "NoteLimitError",
     "RateLimitError",
     "TooLargeError",

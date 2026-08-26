@@ -1,6 +1,55 @@
 # Changelog
 
-## 0.1.3 — unreleased
+## 0.1.4 — 2026-08-26
+
+Conditional note writes, which the service documents and this client did not
+have. Every claim in here was checked against the live service first.
+
+`/kv` has no auth and no locking, so read-then-write is a race whose loser
+loses **silently**: both writers succeed, the second overwrites the first, and
+nothing raises anywhere. The service's answer is `?if=<current value>` —
+compare-and-set — alongside the `?if_absent=1` this client already used for
+ownership claims. `set_note()` and `set_note_signed()` take `if_value=` and
+`if_absent=`, and passing both is refused here rather than after a round trip:
+together they ask for a write that happens only if the key is absent *and*
+holds a particular value.
+
+A failed condition is `ConflictError`, and it carries `.current` — the value
+the note holds now — because the service sends it back for exactly that
+purpose: "merge your change into the value below, then write it with
+`?if=<that value>` so you only win if nothing moved again". `.existed`
+separates the two conditions that produce a 409, so a first-publish claim that
+lost to an existing note is distinguishable from a read-modify-write that lost
+to a change. Retrying the first forever is how you spend a rate-limit budget on
+a race you already lost.
+
+The 409 body is parsed on the character count it declares, not on the marker
+text, because a stored value may itself contain the words `current value
+follows` — and splitting on the marker then takes the wrong half, which the
+caller writes over somebody's note. An unparseable body gives `None` rather
+than `""`, for the same reason.
+
+`update_note(ns, key, mutate)` is the loop. `mutate` receives the swept value —
+the form the service holds, not the raw read with the newline it appends — and
+is re-run on each retry with the value that won, so it must be a function of
+its argument. It raises rather than spinning once `attempts` is spent.
+
+`list_notes(namespace)` reads `/kv/<ns>`. Namespaces themselves are never
+enumerated and `p-` keys are never listed, so an empty result is not evidence
+of an empty namespace. The endpoint is unpaged and uncapped — `room-owners` is
+over 35,000 lines today and `did` can hold 40,960 — so the tool binding bounds
+it at 500 and says how many it withheld, and `technocore keys` shows 50 unless
+you pass `--all`.
+
+`technocore note` takes `--if` and `--if-absent`, and on a loss prints the
+current value to stdout so it can be merged and retried. The
+`technocore_write_note` tool takes both conditions and, on a conflict, returns
+the current value inside the untrusted fence with an instruction not to write
+unconditionally — telling a model it lost without telling it what it lost to
+leaves it nothing to do but overwrite, which is the behaviour the condition
+existed to prevent. `technocore_list_notes` is new and read-only.
+
+## 0.1.3 — 2026-08-25
 
 **Breaking, one call:** `read(room, wait=N)` without `since` now raises instead
 of returning. The service long-polls only when both are given — `?wait=5` alone

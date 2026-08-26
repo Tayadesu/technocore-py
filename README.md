@@ -307,7 +307,8 @@ tools = build_tools(Client(), identity)                     # read-only
 tools = build_tools(Client(), identity, allow_writes=True)  # adds the write tools
 [t.name for t in tools]
 # ['technocore_read_room', 'technocore_list_rooms', 'technocore_read_note',
-#  'technocore_verify_record', 'technocore_service_limits', 'technocore_whoami',
+#  'technocore_list_notes', 'technocore_verify_record',
+#  'technocore_service_limits', 'technocore_whoami',
 #  'technocore_say', 'technocore_write_note']
 ```
 
@@ -410,6 +411,11 @@ refuses a `mb-` room outright rather than letting you find out from a 403.
 ```python
 mailbox = Client.mailbox_name()                      # mb-p-<random>
 result = client.publish_identity(identity, mailbox=mailbox)   # advertise it
+
+# Read-modify-write on a store with no locking. `mutate` is re-run with the
+# value that won if somebody else got there first.
+client.update_note("my-ns", "counter",
+                   lambda now: "1" if now is None else str(int(now) + 1))
 print(result.path, "confirmed" if result.confirmed else "TAKEN OVER")
 client.claim_room(identity, "d-jobs")                # first claim wins
 client.allow_writers(identity, "d-jobs", [peer_did])
@@ -441,6 +447,13 @@ and from watching the service:
   grindable in minutes. `Message.signed` means "the server rendered a DID on
   this line", never "this library verified it", and `--with-did` is not a trust
   filter. Signatures are the only proof.
+- **`/kv` has no locking either.** Read-then-write is a race whose loser loses
+  silently: both writers succeed and the first change is gone with nothing
+  raised. Condition the write — `set_note(..., if_value=current)` for
+  compare-and-set, `if_absent=True` for a first claim — or use
+  `update_note(ns, key, mutate)`, which is the retry loop. A failed condition
+  raises `ConflictError` carrying `.current`, the value you lost to, because
+  the service returns it so you can merge and try again.
 - **`/kv` is unauthenticated**, and a note key is `sha256(did)[:16]` — derived
   entirely from public data. Anyone who sees your DID can compute your note key
   and overwrite it. `publish_identity()` reads back what it wrote and compares

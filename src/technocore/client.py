@@ -7,8 +7,8 @@ import urllib.parse
 import warnings
 
 from ._version import __version__
-from .errors import (HTTPError, SignatureError, TechnocoreError,
-                     TooLargeError)
+from .errors import (ConflictError, HTTPError, SignatureError,
+                     TechnocoreError, TooLargeError)
 from ._text import neutralise, sweep
 from .identity import (did_to_public_key, note_location, sweep, verify,
                        verify_note)
@@ -462,19 +462,136 @@ class Client:
         _check_name(key, "key")
         return strip_banner(self.transport.get(self._url("kv", namespace, key)))
 
-    def set_note(self, namespace, key, value):
+    def list_notes(self, namespace):
+        """The keys in ``namespace``, as ``(namespace, key)`` pairs.
+
+        Namespaces themselves are never enumerated -- there is no listing of
+        listings -- and keys beginning ``p-`` are omitted by the service, which
+        is what makes an unguessable key private.
+
+        Unbounded and unpaged: `room-owners` is 35,286 lines today and `did`
+        can hold 40,960. Read it into something that can take that, or use the
+        `limit` on the tool binding, which caps it for a model's context.
+        """
+        _check_name(namespace, "namespace")
+        body = self.transport.get(self._url("kv", namespace))
+        pairs = []
+        prefix = "/kv/"
+        for line in strip_banner(body).split("\n"):
+            line = line.strip()
+            if not line.startswith(prefix):
+                continue
+            rest = line[len(prefix):]
+            if "/" not in rest:
+                continue
+            listed_ns, _, key = rest.partition("/")
+            # The service echoes a path built from names it validated, but this
+            # is still a listing of strings other people chose.
+            pairs.append((neutralise(listed_ns)[0], neutralise(key)[0]))
+        return pairs
+
+    def set_note(self, namespace, key, value, if_absent=False, if_value=None):
         """Write a note.
 
         Raises :class:`~technocore.errors.NoteLimitError` when the namespace is
         full and this key does not already exist. That is a capacity condition,
         not a bad request: retrying the same key will never succeed until an
         idle note is reclaimed (7 days).
+
+        ``if_absent=True`` writes only if the key does not exist yet -- a
+        first-publish claim. ``if_value=<string>`` writes only if that is the
+        current value -- compare-and-set. Either losing raises
+        :class:`~technocore.errors.ConflictError`, which carries the value the
+        note holds now, because the service sends it precisely so the loser can
+        merge and try again. See :meth:`update_note` for the loop.
+
+        The two are mutually exclusive: sending both asks the service to write
+        only if the key is absent *and* holds a particular value, which nothing
+        can satisfy, and a write that can never succeed should fail here rather
+        than after a round trip.
         """
         _check_name(namespace, "namespace")
         _check_name(key, "key")
         value = _swept_payload(value, MAX_NOTE_CHARS, "note")
-        return self.transport.get(self._url("kv", namespace, key, "set", value),
-                                  idempotent=False)
+        query = self._conditional(if_absent, if_value)
+        url = self._url("kv", namespace, key, "set", value) + query
+        return self.transport.get(url, idempotent=False)
+
+    @staticmethod
+    def _conditional(if_absent, if_value):
+        """Render ``if_absent`` / ``if`` as a query string, refusing both."""
+        if if_absent and if_value is not None:
+            raise TechnocoreError(
+                "if_absent and if_value are mutually exclusive: together they "
+                "ask for a write that happens only if the key is absent and "
+                "also holds %r, which nothing can satisfy" % (if_value,))
+        if if_absent:
+            return "?if_absent=1"
+        if if_value is not None:
+            if not isinstance(if_value, str):
+                raise TechnocoreError("if_value must be a string, got %s"
+                                      % type(if_value).__name__)
+            # Compared against what the service stores, which is the swept
+            # form -- so condition on that, or the comparison loses to a value
+            # we ourselves wrote.
+            return "?if=" + urllib.parse.quote(sweep(if_value), safe="")
+        return ""
+
+    def update_note(self, namespace, key, mutate, attempts=5,
+                    create_missing=True):
+        """Read a note, apply ``mutate``, write it back if nothing moved.
+
+        The read-modify-write loop the service's own 409 body describes:
+        "merge your change into the value below, then write it with
+        ``?if=<that value>`` so you only win if nothing moved again".
+
+        ``mutate`` is called with the current value -- swept, which is the form
+        the service holds, not the raw read with its trailing newline -- or
+        ``None`` if the note does not exist. It returns the new value. It may be called more than once --
+        every retry calls it again with the value that won -- so it must be a
+        function of its argument and not of anything it accumulated on a
+        previous call.
+
+        Returns ``(response_text, value_written)``. Raises
+        :class:`~technocore.errors.ConflictError` if ``attempts`` retries all
+        lose, rather than looping forever against a busier writer.
+
+        Without this, "read then write" on a world-writable store is a race
+        every caller loses silently: the last writer wins and the other
+        change is gone with nothing raised anywhere.
+        """
+        if attempts < 1:
+            raise TechnocoreError("attempts must be at least 1, got %d" % attempts)
+        last = None
+        for _ in range(attempts):
+            try:
+                current = self.get_note(namespace, key)
+            except HTTPError as exc:
+                if exc.status != 404:
+                    raise
+                current = None
+            if current is not None:
+                # Hand `mutate` the form the service actually holds. A raw read
+                # carries the trailing newline the service appends, and a
+                # mutate that compares strings would never match on it.
+                current = sweep(current)
+            if current is None and not create_missing:
+                raise TechnocoreError(
+                    "note %s/%s does not exist and create_missing is False"
+                    % (namespace, key))
+            new_value = mutate(current)
+            try:
+                if current is None:
+                    response = self.set_note(namespace, key, new_value,
+                                             if_absent=True)
+                else:
+                    response = self.set_note(namespace, key, new_value,
+                                             if_value=current)
+                return response, new_value
+            except ConflictError as exc:
+                last = exc
+                continue
+        raise last
 
     #: The only namespaces that accept a signed note write. Everything else is
     #: world-writable, so there is no signed lane to use -- the service returns
@@ -482,7 +599,7 @@ class Client:
     SIGNED_NOTE_NAMESPACES = ("room-owners", "room-allow")
 
     def set_note_signed(self, identity, namespace, key, value, nonce=None,
-                        if_absent=False):
+                        if_absent=False, if_value=None):
         """Write a note on the signed lane. Room ownership only.
 
         Only ``room-owners`` and ``room-allow`` accept this. Every other
@@ -555,8 +672,7 @@ class Client:
             nonce,
             urllib.parse.quote(value, safe=""),
         )
-        if if_absent:
-            url += "?if_absent=1"
+        url += self._conditional(if_absent, if_value)
         response = self.transport.get(url, idempotent=False)
         return response, {"did": identity.did, "namespace": namespace,
                           "key": key, "nonce": nonce, "value": value,

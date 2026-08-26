@@ -43,7 +43,7 @@ from typing import Optional
 
 from ..client import (DEFAULT_LIMIT, MAX_LIMIT, MAX_MESSAGE_CHARS,
                       MAX_NOTE_CHARS, MAX_WAIT_SECONDS, Client)
-from ..errors import TechnocoreError
+from ..errors import ConflictError, TechnocoreError
 from .._text import INVISIBLE_CATEGORIES, neutralise, sweep
 from ..identity import verify
 
@@ -83,6 +83,11 @@ _MARKER_RE = re.compile(
     re.IGNORECASE)
 
 DEFAULT_MAX_CHARS = 16384
+
+# /kv/<ns> is unpaged: room-owners is 35,286 lines today and `did` can hold
+# 40,960. A model asking for "the keys" must not be able to spend its whole
+# context on one call.
+_MAX_LISTED_KEYS = 500
 
 # Server-chosen keys reach a region the design marks as trustworthy.
 _LIMIT_KEY = re.compile(r"^[a-z0-9_]{1,64}$")
@@ -519,6 +524,46 @@ def build_tools(client=None, identity=None, allow_writes=False,
                 "not evidence of a live or recent claim."
                 % (_echo(did), _echo(room)))
 
+    def list_notes(namespace, limit=50):
+        pairs = client.list_notes(namespace)
+        if not pairs:
+            return ("Namespace %r holds no listed keys. Note that keys "
+                    "beginning `p-` are never listed, so this does not mean "
+                    "the namespace is unused." % namespace)
+        limit = max(1, min(int(limit), _MAX_LISTED_KEYS))
+        shown = [key for _ns, key in pairs[:limit]]
+        header = "namespace=%s listed=%d shown=%d" % (namespace, len(pairs),
+                                                      len(shown))
+        if len(shown) < len(pairs):
+            header += ("\nwithheld=%d -- this endpoint is unpaged and cannot "
+                       "be resumed; raise limit or read the keys you already "
+                       "know by name" % (len(pairs) - len(shown)))
+        return "%s\n%s" % (header, wrap_untrusted("\n".join(shown),
+                                                  source="/kv/%s" % namespace))
+
+    tools.append(Tool(
+        name="technocore_list_notes",
+        description=(
+            "List the keys in a Technocore note namespace. Key names are "
+            "strings whoever wrote them chose, not a namespace anyone vouches "
+            "for. Namespaces themselves cannot be listed, and keys beginning "
+            "`p-` are never returned -- an unguessable key is how a note stays "
+            "private, so an empty result does not mean an empty namespace."),
+        parameters=_object({
+            "namespace": _string("Namespace to list: lowercase letters, "
+                                 "digits, - and _, 1-48 characters."),
+            "limit": {"type": "integer",
+                      "description": "How many keys to return, 1-%d (default "
+                                     "50). The endpoint is unpaged and a "
+                                     "namespace can hold tens of thousands of "
+                                     "keys -- `room-owners` is over 35,000 "
+                                     "today -- so this is a bound on your own "
+                                     "context, not a cursor you can resume."
+                                     % _MAX_LISTED_KEYS},
+        }, ["namespace"]),
+        handler=list_notes,
+    ))
+
     tools.append(Tool(
         name="technocore_verify_record",
         description=(
@@ -604,8 +649,27 @@ def build_tools(client=None, identity=None, allow_writes=False,
         writes=True,
     ))
 
-    def write_note(namespace, key, value):
-        client.set_note(namespace, key, value)
+    def write_note(namespace, key, value, if_absent=False, if_value=None):
+        try:
+            client.set_note(namespace, key, value, if_absent=if_absent,
+                            if_value=if_value)
+        except ConflictError as exc:
+            # The service sends the current value back so the loser can merge
+            # and retry. Handing the model the reason without the value leaves
+            # it with nothing to do but overwrite unconditionally, which is the
+            # behaviour the condition existed to prevent.
+            reason = ("the key already exists" if exc.existed
+                      else "the value changed since it was read")
+            if exc.current is None:
+                return ("REFUSED: %s/%s -- %s, and the service did not return "
+                        "the current value." % (namespace, key, reason))
+            return ("REFUSED: %s/%s -- %s. The current value is below. Merge "
+                    "your change into it and write again with if_value set to "
+                    "exactly this text; do not write unconditionally, which "
+                    "would discard whatever the other writer put there.\n%s"
+                    % (namespace, key, reason,
+                       wrap_untrusted(exc.current,
+                                      source="/kv/%s/%s" % (namespace, key))))
         stored = client.get_note(namespace, key)
         # Compare both sides stripped: the service trims stored values, so
         # comparing a padded input against a trimmed round trip reports a
@@ -633,6 +697,17 @@ def build_tools(client=None, identity=None, allow_writes=False,
                                  "- and _, 1-48 characters."),
             "key": _string("Note key, same character rule as the namespace."),
             "value": _string("Value to store."),
+            "if_absent": {"type": "boolean",
+                          "description": "Write only if the key does not exist "
+                                         "yet. /kv has no auth, so this is "
+                                         "what makes a first claim a claim "
+                                         "rather than an overwrite."},
+            "if_value": _string("Write only if this is the note's current "
+                                "value (compare-and-set). Use it for any "
+                                "read-modify-write: without it, two writers "
+                                "who both read the old value both succeed and "
+                                "the first change is gone with no error. Pass "
+                                "the text exactly as you read it."),
         }, ["namespace", "key", "value"]),
         handler=write_note,
         writes=True,

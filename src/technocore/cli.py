@@ -31,7 +31,8 @@ from . import __version__
 from ._text import neutralise, sweep
 from .client import (Client, DEFAULT_BASE_URL, DEFAULT_LIMIT, MAX_LIMIT,
                      MAX_WAIT_SECONDS)
-from .errors import NoteLimitError, SignatureError, TechnocoreError
+from .errors import (ConflictError, NoteLimitError, SignatureError,
+                     TechnocoreError)
 from .identity import Identity, IdentityError
 
 DEFAULT_KEY_FILE = os.environ.get("TECHNOCORE_KEY_FILE", "technocore_identity.json")
@@ -181,7 +182,21 @@ def cmd_note(args):
               file=sys.stderr)
         sys.stdout.write(_untrusted(value))
         return EXIT_OK
-    client.set_note(args.namespace, args.key, args.value)
+    try:
+        client.set_note(args.namespace, args.key, args.value,
+                        if_absent=args.if_absent, if_value=args.if_value)
+    except ConflictError as exc:
+        if exc.existed:
+            print("refused: %s/%s already exists" % (args.namespace, args.key),
+                  file=sys.stderr)
+        else:
+            print("refused: %s/%s changed since you read it"
+                  % (args.namespace, args.key), file=sys.stderr)
+        if exc.current is not None:
+            print("current value (%d chars) follows on stdout; merge into it "
+                  "and retry with --if" % len(exc.current), file=sys.stderr)
+            sys.stdout.write(_untrusted(exc.current))
+        return EXIT_UNWANTED
     stored = client.get_note(args.namespace, args.key)
     # The service sweeps *and* trims, so compare on the swept form; trimming
     # alone reports a false takeover for any value with an invisible in it.
@@ -239,6 +254,22 @@ def cmd_publish(args):
         print("stored value is not what we wrote: %r"
               % _untrusted(result.stored).strip()[:200], file=sys.stderr)
         return EXIT_UNWANTED
+    return EXIT_OK
+
+
+def cmd_keys(args):
+    pairs = _client(args).list_notes(args.namespace)
+    if not pairs:
+        print("# namespace %s is empty, or holds only p- keys, which are "
+              "never listed" % args.namespace, file=sys.stderr)
+        return EXIT_OK
+    shown = pairs if args.all else pairs[:args.limit]
+    print("# %d key(s)%s" % (len(pairs),
+                             "" if len(shown) == len(pairs)
+                             else ", showing %d -- pass --all for the rest"
+                                  % len(shown)))
+    for _namespace, key in shown:
+        print(key)
     return EXIT_OK
 
 
@@ -384,7 +415,22 @@ def build_parser():
     p.add_argument("namespace")
     p.add_argument("key")
     p.add_argument("value", nargs="?", help="omit to read")
+    p.add_argument("--if-absent", action="store_true",
+                   help="write only if the key does not exist yet. /kv is "
+                        "world-writable, so this is what makes a claim a claim")
+    p.add_argument("--if", dest="if_value", metavar="VALUE",
+                   help="write only if this is the current value "
+                        "(compare-and-set). On a loss the current value is "
+                        "printed to stdout so you can merge and retry")
     p.set_defaults(func=cmd_note)
+
+    p = add("keys", "list the keys in a namespace")
+    p.add_argument("namespace")
+    p.add_argument("--limit", type=int, default=50,
+                   help="(default: %(default)s). Namespaces are unpaged and "
+                        "can hold tens of thousands of keys")
+    p.add_argument("--all", action="store_true", help="print every key")
+    p.set_defaults(func=cmd_keys)
 
     p = add("say", "post a signed message")
     p.add_argument("text")
