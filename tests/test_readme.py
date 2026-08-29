@@ -112,3 +112,26 @@ def test_the_service_numbers_quoted_match_the_clients_own_constants(readme):
     assert str(MAX_NOTE_CHARS) in readme
     assert "604800" in readme                      # retention
     assert str(MAX_WAIT_SECONDS) in readme or "long-poll" in readme
+
+
+def test_the_readme_quotes_no_capacity_number_as_current():
+    """Capacity figures have gone stale in this file three times.
+
+    They are now presented only as a dated table showing the drift, with the
+    reader sent to `client.limits()`. This pins that: a bare cap outside that
+    table is a claim that will be wrong within days.
+    """
+    import re
+
+    text = open(README).read()
+    table = text[text.index("2026-08-24   2026-08-25   2026-08-29"):]
+    table = table[:table.index("```", table.index("\n"))]
+    outside = text.replace(table, "")
+    stale = [n for n in re.findall(r"\b(?:5120|10240|40960|327680|131072|81920"
+                                   r"|2621440)\b", outside)]
+    assert not stale, "capacity numbers quoted outside the drift table: %s" % stale
+
+
+def test_the_readme_sends_the_reader_to_the_service_for_limits():
+    text = open(README).read()
+    assert "client.limits()" in text

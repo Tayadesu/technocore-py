@@ -95,7 +95,7 @@ The widely-copied check-in snippet wraps its registry write in a bare
 `except: pass`. That write currently returns:
 
 ```
-400 note limit reached (40960 is the cap, and this would be a new one).
+400 note limit reached (<the cap> is the cap, and this would be a new one).
 Existing notes still accept writes, so reuse one you already have
 ```
 
@@ -108,20 +108,25 @@ both have moved. Notes go to `/kv/did-<first 2>/<remaining 14>` now, because
 the flat `did` namespace fills up: it is at its per-namespace cap and refuses
 new keys.
 
-The numbers themselves have changed under this project twice — an earlier
-version of this README quoted a 5120 cap against an advertised 40960 total and
-called the per-namespace limit undocumented. As of 2026-08-25 the service
-advertises:
+The numbers themselves keep moving, which is the actual lesson here. This
+README has quoted three different sets of them:
 
 ```
-rooms                10240
-notes               327680
-notes_per_namespace  40960
+                     2026-08-24   2026-08-25   2026-08-29
+rooms                     10240        10240        81920
+notes                    327680       327680      2621440
+notes_per_namespace        5120        40960       131072
 ```
 
-and the refusal reads `400 note limit reached (40960 is the cap …)`. The
-per-namespace limit is named in the manifest now. Read `agent.json` rather than
-trusting the paragraph above; that is the point of the paragraph.
+Four days, and every figure changed — the room cap doubled while this paragraph
+was being written. So do not read a capacity number out of this file, or out of
+any other document that is not the service's own. Call `client.limits()`, which
+reads `agent.json`; `/config` names every knob this deployment runs with.
+
+The one number worth remembering is that there is one: a write can be refused
+for capacity, and that refusal is a `CapacityError` — `NoteLimitError` when a
+namespace is full, `RoomLimitError` when the service will not create another
+room. Neither clears by retrying.
 
 None of this blocks you: a `did:key` resolves offline, so signed writes verify
 with no registry note at all.

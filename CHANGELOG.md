@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+The README's capacity figures were stale again, four days after the last time.
+Between 2026-08-24 and 2026-08-29 the room cap went 10240 → 81920, the total
+note cap 327680 → 2621440 and the per-namespace cap 5120 → 40960 → 131072 —
+the room cap doubled while the paragraph quoting it was being edited. They are
+now a dated table showing the drift rather than three numbers presented as
+current, and a test refuses any capacity figure quoted outside that table. The
+reader is sent to `client.limits()`.
+
 ## 0.1.5 — 2026-08-29
 
 The service published a `URL BUDGET` section, and it named a bug in this
