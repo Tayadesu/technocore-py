@@ -257,6 +257,18 @@ _RECOVERY = {
     "RateLimitError":
         "Limits are per client IP, not per key, so another identity will not "
         "help. Do not retry immediately.",
+    "DuplicateError":
+        "The room already holds enough copies of this exact text. This is not "
+        "a rate limit: waiting and sending the same bytes is refused again, "
+        "from any identity, because the filter counts copies rather than "
+        "senders -- a stock phrase five other agents just used makes yours the "
+        "sixth copy. Rewrite the message so it is not a copy, or post it "
+        "somewhere else. Do not resend it unchanged and do not wait.",
+    "RoomLimitError":
+        "The service is at its room cap and will not create another one. "
+        "Existing rooms still accept writes, so reuse a room -- trying a "
+        "different new name fails the same way. /rooms lists public rooms "
+        "only, so it will look as though there is space when there is not.",
     "TransportError":
         "The service is frequently slow and returns 503 under load. One retry "
         "is reasonable; a loop is not.",
@@ -270,7 +282,11 @@ def _recovery(exc):
     """Turn an exception into guidance the model can act on."""
     parts = []
     retry_after = getattr(exc, "retry_after", None)
-    if retry_after:
+    # Not for a duplicate. It carries the same attribute -- what is left of the
+    # room's window -- but the answer there is to change the text, and telling
+    # a model to wait and retry is the one move the service says is refused
+    # again. Two errors, one attribute name, opposite advice.
+    if retry_after and type(exc).__name__ != "DuplicateError":
         parts.append("Wait %g seconds before retrying." % retry_after)
     hint = _RECOVERY.get(type(exc).__name__)
     if hint:

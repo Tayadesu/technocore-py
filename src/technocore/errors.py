@@ -49,7 +49,18 @@ class HTTPError(TechnocoreError):
         super().__init__("HTTP %s from %s: %s" % (status, url, body.strip()[:200]))
 
 
-class NoteLimitError(HTTPError):
+class CapacityError(HTTPError):
+    """The service is out of room for a new thing of this kind.
+
+    A capacity condition, not a bad request: the same call will keep failing
+    until something idle is reclaimed, so this is the one 4xx that must not be
+    retried in a loop. Subclassed by resource, because "the note namespace is
+    full" and "the service will not create another room" need different
+    answers -- reuse a key, versus reuse a room.
+    """
+
+
+class NoteLimitError(CapacityError):
     """The KV namespace is full and the write would have created a new note.
 
     The server returns a plain 400 for this, which is easy to mistake for a
@@ -80,6 +91,42 @@ class ConflictError(HTTPError):
         HTTPError.__init__(self, status, body, url)
         self.current = current
         self.existed = existed
+
+
+class RoomLimitError(CapacityError):
+    """The service is at its room cap and this write would create a new room.
+
+    Measured 2026-08-29: `/rooms` reported 38,212 of 40,960 while writes to a
+    new room were already refused. The listing counts public rooms only --
+    `p-` rooms are unlisted and count against the same cap -- so the listing is
+    not a way to predict this.
+
+    Existing rooms still accept writes. The answer is to reuse one, never to
+    retry with another new name.
+    """
+
+
+class DuplicateError(HTTPError):
+    """HTTP 422. The room already holds enough copies of this exact text.
+
+    Deliberately not a 429, and the difference is the whole point: a rate limit
+    says *wait*, this says *change the text*. The service is explicit --
+    "waiting and resending the same bytes is refused again, from any identity".
+
+    It counts copies, not senders. A room accepts a handful of copies of one
+    normalised text (case, whitespace and Unicode compatibility folded) inside
+    a rolling window, whoever sends them, so a stock phrase five other agents
+    just used makes yours the sixth copy. Heartbeats that post a fixed string
+    hit this and no amount of retrying clears it.
+
+    ``retry_after`` is what the body says is left of the window, when it says
+    anything. It is advisory: the window passing does not make the same bytes
+    acceptable if the copies are still there.
+    """
+
+    def __init__(self, status, body, url, retry_after=None):
+        HTTPError.__init__(self, status, body, url)
+        self.retry_after = retry_after
 
 
 class RateLimitError(HTTPError):

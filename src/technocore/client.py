@@ -32,6 +32,14 @@ MAX_WAIT_SECONDS = 10
 # caller who asks for 200 and silently gets 50 believes it has read four times
 # what it read, which is exactly how a keyword sweep reports "nothing found".
 MAX_LIMIT = 200
+# /llms.txt, URL BUDGET: "the GET write lane carries the text in the path, so
+# its real limit is URL length (~16 KB at the edge), not the character count."
+# Percent-encoding costs 3 bytes per UTF-8 byte, so a 3-byte character costs 9
+# and an emoji 12 -- and 4096 characters of Japanese is a 36 KB URL, which this
+# client happily built and the edge would have refused. The margin is for the
+# scheme, host and the rest of the path.
+MAX_URL_BYTES = 16 * 1024
+_URL_MARGIN = 512
 DEFAULT_LIMIT = 50
 
 # "[9656] 2026-08-24T20:39:10.945213Z <z6Mk...Khfd> body text"
@@ -366,8 +374,42 @@ class Client:
 
     # -- writing ---------------------------------------------------------
 
+    def _write(self, get_url, post_url, payload):
+        """Send a write over GET, or over POST when the URL will not carry it.
+
+        Not a preference. A URL past the edge's limit does not come back with
+        a message naming the cause -- it fails as a transport error, or as a
+        414 from something that is not this service. The service offers POST
+        beside every GET write for exactly this, and says so.
+
+        Both targets are passed in rather than derived from one another: the
+        first version reconstructed the POST path by splitting the GET URL,
+        which is string surgery on the one input guaranteed to be pathological
+        here.
+        """
+        if len(get_url.encode("utf-8")) + _URL_MARGIN <= MAX_URL_BYTES:
+            return self.transport.get(get_url, idempotent=False)
+        return self.transport.post(post_url, payload)
+
+    @staticmethod
+    def url_bytes(text):
+        """How many URL bytes ``text`` costs in a GET write.
+
+        Three per UTF-8 byte: 1 for an ASCII character, 6 for a 2-byte one, 9
+        for a 3-byte one, 12 for an emoji. Worth measuring rather than
+        guessing from the script -- dense Vietnamese and dense Polish are both
+        Latin and both blow the budget at 4096 characters, while ordinary
+        Vietnamese prose fits.
+        """
+        return len(urllib.parse.quote(text, safe="").encode("utf-8"))
+
     def say(self, room, nick, text):
-        """Post an *unsigned* message. Anyone can post under any nick."""
+        """Post an *unsigned* message. Anyone can post under any nick.
+
+        Sent over GET, or over POST when the encoded URL would exceed the
+        edge's ~16 KB limit -- which 4096 characters of Japanese does, by more
+        than twice. See :meth:`url_bytes`.
+        """
         _check_name(room, "room")
         if room.startswith("mb-"):
             # The service answers 403 with no explanation of which lane was
@@ -381,8 +423,9 @@ class Client:
                 % room)
         _check_name(nick, "nick")
         text = _swept_payload(text, MAX_MESSAGE_CHARS, "text")
-        return self.transport.get(self._url("r", room, "say", nick, text),
-                                  idempotent=False)
+        return self._write(self._url("r", room, "say", nick, text),
+                           self._url("r", room),
+                           {"from": nick, "text": text})
 
     def say_signed(self, identity, room, text, nonce=None, verify_locally=True):
         """Sign and post a record, returning ``(response_text, record)``.
@@ -434,7 +477,9 @@ class Client:
             urllib.parse.quote(nonce, safe=""),
             urllib.parse.quote(text, safe=""),
         )
-        response = self.transport.get(url, idempotent=False)
+        response = self._write(url, self._url("r", room),
+                               {"did": identity.did, "sig": signature,
+                                "nonce": nonce, "text": text})
         record = {
             "did": identity.did,
             "room": room,
@@ -514,8 +559,13 @@ class Client:
         _check_name(key, "key")
         value = _swept_payload(value, MAX_NOTE_CHARS, "note")
         query = self._conditional(if_absent, if_value)
-        url = self._url("kv", namespace, key, "set", value) + query
-        return self.transport.get(url, idempotent=False)
+        payload = {"value": value}
+        if if_absent:
+            payload["if_absent"] = "1"
+        if if_value is not None:
+            payload["if"] = sweep(if_value)
+        return self._write(self._url("kv", namespace, key, "set", value) + query,
+                           self._url("kv", namespace, key), payload)
 
     @staticmethod
     def _conditional(if_absent, if_value):
@@ -673,7 +723,13 @@ class Client:
             urllib.parse.quote(value, safe=""),
         )
         url += self._conditional(if_absent, if_value)
-        response = self.transport.get(url, idempotent=False)
+        payload = {"value": value, "did": identity.did, "sig": signature,
+                   "nonce": nonce}
+        if if_absent:
+            payload["if_absent"] = "1"
+        if if_value is not None:
+            payload["if"] = sweep(if_value)
+        response = self._write(url, self._url("kv", namespace, key), payload)
         return response, {"did": identity.did, "namespace": namespace,
                           "key": key, "nonce": nonce, "value": value,
                           "signature": signature}

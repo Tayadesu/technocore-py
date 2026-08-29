@@ -22,6 +22,7 @@ not change DNS behaviour for the rest of the host process, and it falls back to
 dual-stack.
 """
 
+import json
 import re
 import http.client
 import socket
@@ -30,8 +31,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .errors import (ConflictError, HTTPError, NoteLimitError,
-                     RateLimitError, TooLargeError, TransportError)
+from .errors import (ConflictError, DuplicateError, HTTPError,
+                     NoteLimitError, RateLimitError, RoomLimitError,
+                     TooLargeError, TransportError)
 
 __all__ = ["Transport", "is_retryable"]
 
@@ -43,6 +45,9 @@ MAX_RETRY_AFTER = 60.0
 #: every character -- so the integrations layer's 16 KB truncation is the last
 #: step, not the first.
 MAX_BODY_BYTES = 8 * 1024 * 1024
+# openapi: "Body over 256 KiB" is a 413. Checked before sending, so an
+# oversized body costs nothing.
+MAX_POST_BYTES = 256 * 1024
 
 
 def is_retryable(status):
@@ -174,6 +179,24 @@ class Transport:
         # Fall back to dual-stack so a host with *only* IPv6 still works.
         return (self._v4_opener, self._default_opener)
 
+    def post(self, url, payload, idempotent=False):
+        """POST a JSON body. Same retry contract as :meth:`get`.
+
+        The service offers this beside every GET write for one reason: a URL
+        cannot carry a long non-Latin message. Percent-encoding costs three
+        bytes per UTF-8 byte, so a 3-byte character costs 9 and an emoji 12 --
+        against a ~16 KB edge limit, anything averaging over 4 bytes per
+        character cannot reach the 4096-character cap in a URL at all. The
+        service's own words. Bodies are capped at 256 KiB.
+        """
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if len(body) > MAX_POST_BYTES:
+            raise TooLargeError(
+                "request body is %d bytes; the service caps a POST at %d"
+                % (len(body), MAX_POST_BYTES))
+        return self._request(url, idempotent, data=body,
+                             content_type="application/json")
+
     def get(self, url, idempotent=True):
         """Return the response body as text, or raise a typed error.
 
@@ -188,9 +211,14 @@ class Transport:
         A 5xx or 429, by contrast, is the server explicitly declining to act, so
         those are retried even for writes.
         """
+        return self._request(url, idempotent)
+
+    def _request(self, url, idempotent, data=None, content_type=None):
+        headers = {"User-Agent": self.user_agent}
+        if content_type:
+            headers["Content-Type"] = content_type
         try:
-            request = urllib.request.Request(url,
-                                             headers={"User-Agent": self.user_agent})
+            request = urllib.request.Request(url, data=data, headers=headers)
         except ValueError as exc:
             raise TransportError(url, 0, str(exc))
         last_reason = "unknown"
@@ -264,11 +292,33 @@ def _classify(status, body, url, headers=None):
     # otherwise indistinguishable from a malformed request. Retrying never
     # helps, so callers need to be able to tell these apart.
     if status == 400 and "limit reached" in lowered:
+        # Two different capacity conditions share one status and one phrase.
+        # Catching NoteLimitError for "the namespace is full" also caught "the
+        # service will not create another room", whose answer is to reuse a
+        # room rather than a key.
+        if "room limit" in lowered:
+            return RoomLimitError(status, body, url)
         return NoteLimitError(status, body, url)
     if status == 409:
         current, existed = _parse_conflict(body)
         return ConflictError(status, body, url, current, existed)
+    if status == 422:
+        return DuplicateError(status, body, url, _parse_duplicate_wait(body))
     return HTTPError(status, body, url)
+
+
+_SECONDS = re.compile(r"(\d+(?:\.\d+)?)\s*(?:more\s+)?seconds?", re.IGNORECASE)
+
+
+def _parse_duplicate_wait(body):
+    """Seconds the room says the duplicate window still has to run, or None.
+
+    Advisory only. Waiting it out and resending the same bytes is refused
+    again -- the service says so in as many words -- so this is for reporting,
+    not for a sleep loop.
+    """
+    match = _SECONDS.search(body)
+    return float(match.group(1)) if match else None
 
 
 #: The 409 body ends with the note's current value, introduced by a line that
