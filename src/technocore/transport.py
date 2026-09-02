@@ -48,6 +48,9 @@ MAX_BODY_BYTES = 8 * 1024 * 1024
 # openapi: "Body over 256 KiB" is a 413. Checked before sending, so an
 # oversized body costs nothing.
 MAX_POST_BYTES = 256 * 1024
+# A room's ring is 10 MiB (`room_ring_bytes`), so an export is legitimately
+# larger than the general ceiling. /r/lobby/export measured 9.0 MiB.
+MAX_EXPORT_BYTES = 12 * 1024 * 1024
 
 
 def is_retryable(status):
@@ -197,6 +200,21 @@ class Transport:
         return self._request(url, idempotent, data=body,
                              content_type="application/json")
 
+    def get_with_headers(self, url, max_bytes=None):
+        """Like :meth:`get`, but returns ``(text, headers)``.
+
+        Some answers put their one piece of metadata in a header rather than
+        the body -- `/r/<room>/export` stamps `X-Room-Generation` and keeps the
+        body pure JSONL so `curl … > room.jsonl` is a clean record file.
+
+        ``max_bytes`` raises the buffering ceiling for a caller that knows the
+        response is legitimately large. The default 8 MiB is below a room's
+        10 MiB ring, so an export of a busy room fails on the cap rather than
+        on anything real -- /r/lobby/export measured 9.0 MiB.
+        """
+        return self._request(url, True, max_bytes=max_bytes,
+                             want_headers=True)
+
     def get(self, url, idempotent=True):
         """Return the response body as text, or raise a typed error.
 
@@ -213,7 +231,9 @@ class Transport:
         """
         return self._request(url, idempotent)
 
-    def _request(self, url, idempotent, data=None, content_type=None):
+    def _request(self, url, idempotent, data=None, content_type=None,
+                 max_bytes=None, want_headers=False):
+        cap = MAX_BODY_BYTES if max_bytes is None else max_bytes
         headers = {"User-Agent": self.user_agent}
         if content_type:
             headers["Content-Type"] = content_type
@@ -227,13 +247,21 @@ class Transport:
             for opener in self._openers(idempotent):
                 try:
                     with opener.open(request, timeout=self.timeout) as response:
-                        raw = response.read(MAX_BODY_BYTES + 1)
-                    if len(raw) > MAX_BODY_BYTES:
+                        raw = response.read(cap + 1)
+                        # Named apart from the request headers above, which
+                        # this shadowed -- and read only when asked for, so a
+                        # response object without them still works.
+                        response_headers = (getattr(response, "headers", None)
+                                            if want_headers else None)
+                    if len(raw) > cap:
                         raise TooLargeError(
                             "%s returned more than %d bytes; refusing to buffer "
-                            "it" % (url, MAX_BODY_BYTES))
+                            "it" % (url, cap))
                     self._working_opener = opener
-                    return raw.decode("utf-8", "replace")
+                    text = raw.decode("utf-8", "replace")
+                    if want_headers:
+                        return text, (response_headers or {})
+                    return text
                 except urllib.error.HTTPError as exc:
                     # HTTPError subclasses URLError, so this arm must come first.
                     # Reaching here means the server answered, so the opener works.

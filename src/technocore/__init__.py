@@ -18,9 +18,10 @@ see sections 7 and 8 of the Apache-2.0 LICENSE.
     assert Client.verify_record(record)
 """
 
-from .client import (Client, Message, PublishResult, RoomHistory,
-                     DEFAULT_BASE_URL, DEFAULT_LIMIT, MAX_LIMIT,
-                     MAX_URL_BYTES, parse_room, strip_banner)
+from .client import (Client, Export, ExportedRecord, Message,
+                     PublishResult, RoomHistory, DEFAULT_BASE_URL,
+                     DEFAULT_LIMIT, MAX_LIMIT, MAX_URL_BYTES,
+                     parse_room, strip_banner)
 from .errors import (
     CapacityError,
     ConflictError,
@@ -45,6 +46,8 @@ from ._version import __version__
 __all__ = [
     "Client",
     "Identity",
+    "Export",
+    "ExportedRecord",
     "Message",
     "PublishResult",
     "RoomHistory",

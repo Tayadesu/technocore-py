@@ -139,6 +139,11 @@ def cmd_read(args):
     return EXIT_OK
 
 
+#: The room cmd_tail is following, so the gap line can name it in the command
+#: it suggests. A module-level slot because on_gap's signature is the client's.
+_CURRENT_ROOM = [""]
+
+
 def _report_gap(missed, first_seq, cursor):
     """Print the gap as a plain line, not as a Python warning.
 
@@ -146,13 +151,16 @@ def _report_gap(missed, first_seq, cursor):
     source, which in otherwise clean CLI output reads like a crash. It also
     suggested raising `limit` and polling more often, and `tail` had neither.
     """
-    print("# skipped %d message(s): sequences %d..%d are unreachable -- "
-          "`since` returns the newest matches and cannot page backwards"
-          % (missed, cursor + 1, first_seq - 1), file=sys.stderr)
+    print("# skipped %d message(s): sequences %d..%d -- `since` returns the "
+          "newest matches and cannot page backwards. `technocore export %s "
+          "--since %d` recovers whatever is still retained"
+          % (missed, cursor + 1, first_seq - 1, _CURRENT_ROOM[0], cursor),
+          file=sys.stderr)
 
 
 def cmd_tail(args):
     client = _client(args)
+    _CURRENT_ROOM[0] = args.room
     # No cursor bootstrap here: follow() does its own, and doing it twice cost
     # an extra read on an empty room -- latest_seq is None there, so since=None
     # reached follow() anyway.
@@ -270,6 +278,33 @@ def cmd_keys(args):
                                   % len(shown)))
     for _namespace, key in shown:
         print(key)
+    return EXIT_OK
+
+
+def cmd_export(args):
+    export = _client(args).export_room(args.room)
+    records = export.since(args.since) if args.since is not None else list(export)
+    if not records:
+        print("# %s exported empty (generation %s). A room nobody has written "
+              "to exports the same as one that never existed."
+              % (args.room, export.generation), file=sys.stderr)
+        return EXIT_OK
+    if args.verify:
+        # Verified against the room name the caller typed, never one read back
+        # from the service.
+        good = sum(1 for r in records if r.verify(args.room))
+        signed = sum(1 for r in records if r.signed)
+        print("# %d record(s), generation %s: %d signed, %d verify"
+              % (len(records), export.generation, signed, good), file=sys.stderr)
+    else:
+        print("# %d record(s), generation %s" % (len(records), export.generation),
+              file=sys.stderr)
+    for record in records:
+        # The stored line, byte for byte -- re-serialising it would break the
+        # signature it carries. Hence stdout, while every human-facing line
+        # above goes to stderr: `technocore export lobby > room.jsonl` is a
+        # record file, not a report.
+        sys.stdout.write(record.raw + "\n")
     return EXIT_OK
 
 
@@ -423,6 +458,16 @@ def build_parser():
                         "(compare-and-set). On a loss the current value is "
                         "printed to stdout so you can merge and retry")
     p.set_defaults(func=cmd_note)
+
+    p = add("export", "dump a room's retained ring as JSONL")
+    p.add_argument("room", nargs="?", default="lobby", help="(default: %(default)s)")
+    p.add_argument("--since", type=int,
+                   help="only records after this sequence -- this is how you "
+                        "recover what `tail` reported skipping, which no read "
+                        "query can reach")
+    p.add_argument("--verify", action="store_true",
+                   help="check every signature against the room name you typed")
+    p.set_defaults(func=cmd_export)
 
     p = add("keys", "list the keys in a namespace")
     p.add_argument("namespace")

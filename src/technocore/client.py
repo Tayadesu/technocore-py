@@ -12,9 +12,10 @@ from .errors import (ConflictError, HTTPError, SignatureError,
 from ._text import neutralise, sweep
 from .identity import (did_to_public_key, note_location, sweep, verify,
                        verify_note)
-from .transport import Transport
+from .transport import MAX_EXPORT_BYTES, Transport
 
-__all__ = ["Client", "Message", "PublishResult", "RoomHistory", "parse_room",
+__all__ = ["Client", "Export", "ExportedRecord", "Message",
+           "PublishResult", "RoomHistory", "parse_room",
            "strip_banner", "DEFAULT_BASE_URL", "DEFAULT_LIMIT", "MAX_LIMIT",
            "MAX_MESSAGE_CHARS", "MAX_NOTE_CHARS"]
 
@@ -107,6 +108,126 @@ class RoomHistory(list):
         return self.high
 
 
+class ExportedRecord(object):
+    """One line of `/r/<room>/export`, with its bytes intact.
+
+    ``text`` and ``nick`` are exactly as stored, because a signature covers
+    those bytes and anything else fails to verify. ``display_text`` is the
+    neutralised form for a terminal or a model -- a room is world-writable, so
+    the raw field is hostile input the moment it stops being a signature input.
+    """
+
+    __slots__ = ("seq", "timestamp", "did", "nick", "text", "nonce",
+                 "signature", "raw")
+
+    def __init__(self, record, raw):
+        self.raw = raw
+        self.seq = record.get("seq")
+        self.timestamp = record.get("ts")
+        sender = record.get("from")
+        # `from` is the DID on a signed record and the nickname on an unsigned
+        # one; the service does not use two fields for it.
+        signed = isinstance(sender, str) and sender.startswith("did:key:")
+        self.did = sender if signed else None
+        self.nick = None if signed else sender
+        self.text = record.get("text")
+        # Kept as an int, which Python holds exactly. A stored nonce runs to 19
+        # digits, past 2**53 -- float(1788111393235568962) is
+        # 1788111393235568896, and a float-rounded nonce fails a good
+        # signature. json.loads is safe; json.loads(..., parse_int=float) is
+        # not, and neither is a round trip through a language whose numbers are
+        # doubles.
+        self.nonce = record.get("nonce")
+        self.signature = record.get("sig")
+
+    @property
+    def signed(self):
+        """Carries a signature and a DID -- not that either was checked."""
+        return bool(self.signature and self.did)
+
+    @property
+    def display_text(self):
+        """The text, neutralised, for anywhere that is not a signature check."""
+        return neutralise(self.text or "")[0]
+
+    def verify(self, room):
+        """True if this record's signature checks out over its stored bytes.
+
+        ``room`` is the caller's own name for the room, never one read back
+        from the service: the payload is ``room|nonce|text`` and taking the
+        room from the same place as the signature proves nothing.
+        """
+        if not self.signed:
+            return False
+        try:
+            verify(self.did, self.signature, room, str(self.nonce), self.text)
+        except (SignatureError, TechnocoreError):
+            return False
+        return True
+
+    def __repr__(self):
+        return "<ExportedRecord seq=%s %s>" % (
+            self.seq, self.did or ("~%s" % self.nick))
+
+
+class Export(object):
+    """A room's exported ring: iterable over :class:`ExportedRecord`.
+
+    ``generation`` is the conversation epoch the dump belongs to. A room that
+    is reaped and recreated starts its sequence numbers again, so two records
+    can share a `seq` and mean different messages -- qualify anything you
+    store with the generation. 0 means the room never existed.
+    """
+
+    def __init__(self, room, generation, body):
+        self.room = room
+        self.generation = generation
+        self._body = body
+        self._records = None
+
+    def _parse(self):
+        # Parsed once and kept. `len(export)` followed by iterating it would
+        # otherwise decode 9 MB twice, and the caller has no way to tell.
+        if self._records is None:
+            records = []
+            for line in self._body.split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    # A truncated or malformed line is skipped rather than
+                    # ending the export: the body is cut to the last complete
+                    # line, but a future field or a torn byte should not cost
+                    # the caller every record after it.
+                    continue
+                if isinstance(record, dict):
+                    records.append(ExportedRecord(record, line))
+            self._records = records
+        return self._records
+
+    def __iter__(self):
+        return iter(self._parse())
+
+    def __len__(self):
+        return len(self._parse())
+
+    def since(self, seq):
+        """Records after ``seq`` -- what a follower missed, recovered.
+
+        `since` on a read cannot page backwards, so a follower that falls
+        behind has no query that reaches the difference. This does: the export
+        is the stored file, so anything still retained is in it. Pass the
+        cursor `follow()` was on when it reported the gap.
+        """
+        return [r for r in self._parse()
+                if r.seq is not None and r.seq > seq]
+
+    def __repr__(self):
+        return "<Export room=%r generation=%s bytes=%d>" % (
+            self.room, self.generation, len(self._body))
+
+
 class PublishResult(tuple):
     """``(confirmed, stored)`` -- plus the location the write actually used.
 
@@ -196,6 +317,35 @@ class Client:
         return "%s/%s" % (self.base_url, "/".join(quoted))
 
     # -- reading ---------------------------------------------------------
+
+    def export_room(self, room):
+        """The room's whole retained ring, as an :class:`Export`.
+
+        This is the answer to the gap :meth:`follow` can only report. `since`
+        filters and returns the newest survivors, so a follower that falls
+        behind cannot page back to what it missed -- but the export is the
+        stored file, so whatever is still retained is in it.
+
+        Byte-exact and never re-serialized, which is the point: a signed record
+        re-verifies from its exported line alone. Records are returned with
+        their fields exactly as stored, *not* neutralised -- neutralising would
+        change the bytes the signature covers. Use ``.text`` for verification
+        and ``.display_text`` for anything that reaches a terminal or a model.
+
+        A snapshot: sized when the file is opened and cut back to the last
+        complete line, so a write landing mid-export is left out rather than
+        torn. Re-export to catch it. And the ring forgets -- this copies what
+        is retained now, nothing older.
+        """
+        _check_name(room, "room")
+        body, headers = self.transport.get_with_headers(
+            self._url("r", room, "export"), max_bytes=MAX_EXPORT_BYTES)
+        generation = headers.get("X-Room-Generation")
+        try:
+            generation = int(generation)
+        except (TypeError, ValueError):
+            generation = None
+        return Export(room, generation, body)
 
     def read(self, room, since=None, wait=None, limit=None):
         """Return the room's recent history.
@@ -320,8 +470,10 @@ class Client:
                             "follow(%r) is skipping messages: a page began "
                             "above the cursor it should have continued from, "
                             "and `since` cannot page backwards to reach the "
-                            "difference. Pass on_gap= to count or handle them. "
-                            "Reported once per follow() call." % (room,),
+                            "difference. export_room(%r).since(cursor) can "
+                            "recover whatever is still retained. Pass on_gap= "
+                            "to count or handle them. Reported once per "
+                            "follow() call." % (room, room),
                             stacklevel=2)
             highest = cursor
             yielded = False
