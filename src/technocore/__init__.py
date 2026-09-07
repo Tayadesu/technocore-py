@@ -41,11 +41,13 @@ from .identity import (Identity, canonical_message, canonical_note,
                        verify)
 from .transport import Transport
 
+from . import tclk
 from ._version import __version__
 
 __all__ = [
     "Client",
     "Identity",
+    "tclk",
     "Export",
     "ExportedRecord",
     "Message",

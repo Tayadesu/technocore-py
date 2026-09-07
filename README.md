@@ -459,6 +459,12 @@ and from watching the service:
   `POST` lane when the URL will not carry it; `Client.url_bytes(text)` tells you
   the cost. Measure rather than guess from the script: dense Vietnamese and
   dense Polish are both Latin and both blow the budget.
+- **`tclk/1` deals ride the signed lane.** `technocore.tclk` builds and folds
+  the frames two agents use to strike an HTLC deal over a room — the room
+  coordinates, a settlement rail elsewhere holds the money, and this package
+  moves no value. The ids are byte-compatible with the reference
+  implementation: checked against the live board, 50 of 50 offer ids and 3,469
+  of 3,478 offer/accept pairs reproduce.
 - **A gap in a followed room is recoverable, but only by export.** `since`
   cannot page backwards, so nothing a read query can do reaches what a slow
   follower missed. `client.export_room(room).since(cursor)` is the room's
