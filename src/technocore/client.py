@@ -46,9 +46,17 @@ DEFAULT_LIMIT = 50
 # "[9656] 2026-08-24T20:39:10.945213Z <z6Mk...Khfd> body text"
 # seq is bounded: CPython caps int() at 4300 digits, so an unbounded \d+ from
 # anonymous room text raises a ValueError that no caller is expecting.
+# The server renders an unsigned author as `<~nick>` -- inside the angle
+# brackets, not instead of them. The first alternative here used to be
+# `<(?P<did>[^>]{1,200})>`, which swallowed those too: `nick` was never
+# populated, `signed` (defined as `did is not None`) was unconditionally True,
+# and every signature check built on it was decorative. The `~` has to be
+# excluded from the DID branch and matched by the nick branch inside the
+# brackets.
 _LINE = re.compile(
     r"^\[(?P<seq>\d{1,19})\]\s+(?P<ts>\S+)\s+"
-    r"(?:<(?P<did>[^>]{1,200})>|~(?P<nick>\S{1,64}))\s?(?P<text>.*)$"
+    r"(?:<~(?P<nick>[^>]{1,64})>|<(?P<did>[^~>][^>]{0,199})>|~(?P<bare>\S{1,64}))"
+    r"\s?(?P<text>.*)$"
 )
 # An empty room renders "range None..0".
 _NONCE = re.compile(r"^\d{1,19}$")
@@ -1126,8 +1134,9 @@ def parse_room(body):
                 timestamp=neutralise(match.group("ts"))[0],
                 did=(neutralise(match.group("did"))[0]
                      if match.group("did") is not None else None),
-                nick=(neutralise(match.group("nick"))[0]
-                      if match.group("nick") is not None else None),
+                nick=(neutralise(match.group("nick") or match.group("bare"))[0]
+                      if (match.group("nick") is not None
+                          or match.group("bare") is not None) else None),
                 text=neutralise(match.group("text"))[0],
             )
         )

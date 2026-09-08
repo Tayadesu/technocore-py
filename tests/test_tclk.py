@@ -197,3 +197,49 @@ def test_the_accept_derives_a_room_both_sides_can_compute():
     _secret, statement = tclk.generate_hash_lock()
     accept = tclk.build_accept(DID, LIVE_OFFER, statement)
     assert tclk.deal_room(accept["contract"]).startswith("mb-p-tclk-")
+
+
+# -- the author field, which was decorative for four versions ----------------
+
+def test_an_unsigned_author_in_brackets_is_not_signed():
+    """The server renders an unsigned author as `<~nick>`.
+
+    The parser's DID branch used to swallow that, so `nick` was never
+    populated and `signed` -- defined as `did is not None` -- was
+    unconditionally True. Live, on a busy board, 17 of 30 records were
+    unsigned and all 30 reported signed. Every signature check built on the
+    field was therefore decorative, on both sides of a protocol whose one
+    security property is that an unsigned frame is data rather than a
+    commitment.
+    """
+    from technocore import parse_room
+
+    body = ("# room x  messages 4  range 1..4\n"
+            "[1] 2026-09-08T00:00:00Z <~leverkusentanjac4> unsigned\n"
+            "[2] 2026-09-08T00:00:01Z <z6Mk…7PqE> signed abbreviated\n"
+            "[3] 2026-09-08T00:00:02Z ~barenick bare nick\n"
+            "[4] 2026-09-08T00:00:03Z <did:key:z6MkuL8nHaYFC4W3sXSxVdVi7pks"
+            "L2ZRr4CgU5LTXymrjv8a> signed full\n")
+    messages = list(parse_room(body))
+    assert [m.signed for m in messages] == [False, True, False, True]
+    assert messages[0].nick == "leverkusentanjac4" and messages[0].did is None
+    assert messages[2].nick == "barenick"
+    assert messages[1].did == "z6Mk…7PqE"
+
+
+def test_a_rendered_did_is_abbreviated_and_is_not_an_identity():
+    """`Message.did` is what the server drew, not who wrote it.
+
+    Comparing it to a full `did:key:` never matches, which is how a payer
+    that looked for its counterparty's messages found none, forever. Identity
+    comparisons belong on the export, whose records carry the whole DID.
+    """
+    from technocore import parse_room
+
+    body = ("# room x  messages 1  range 1..1\n"
+            "[1] 2026-09-08T00:00:00Z <z6Mk…ZpWZ> hi\n")
+    message = list(parse_room(body))[0]
+    assert message.signed
+    assert not message.did.startswith("did:key:")
+    assert message.did != ("did:key:z6MkmGwVm4qswSyN1aDm8NRiabEzKzm5pcjq"
+                           "JqZ4nQYiZpWZ")

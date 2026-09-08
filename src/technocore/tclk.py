@@ -237,7 +237,24 @@ def decode_frame(text):
 
 
 def validate_frame(frame):
-    """Shape check against the generated field table. Returns the frame."""
+    """Shape check against the generated field table. Returns the frame.
+
+    Total: every input path raises `TclkError` and nothing else. A validator
+    that can raise `TypeError` is not a validator -- callers guard the error
+    it documents, so anything else escapes and stops the caller, which for an
+    unattended agent means one crafted frame in a world-writable room halts it
+    and strands whatever it had already committed to publicly.
+    """
+    try:
+        return _validate_frame(frame)
+    except TclkError:
+        raise
+    except Exception as exc:                            # noqa: BLE001
+        raise TclkError("malformed frame (%s): %s"
+                        % (type(exc).__name__, str(exc)[:120]))
+
+
+def _validate_frame(frame):
     if not isinstance(frame, dict):
         raise TclkError("frame must be a dict")
     kind = frame.get("type")
@@ -252,6 +269,10 @@ def validate_frame(frame):
         if frame.get(key) is None:
             raise TclkError("%s frame is missing %r" % (kind, key))
 
+    for key in required:
+        if key in ("job", "presig") or isinstance(frame[key], (str, int, list)):
+            continue
+        raise TclkError("%s must not be %r" % (key, frame[key]))
     if not _DID.match(str(frame["from"])):
         raise TclkError("`from` is not an Ed25519 did:key: %r" % frame["from"])
     if kind != "offer" and not _HEX32.match(str(frame.get("contract", ""))):
@@ -298,6 +319,15 @@ def _validate_offer(frame):
     rails = frame["rails"]
     if not isinstance(rails, list) or not rails:
         raise TclkError("rails must be a non-empty list")
+    # Every element checked before anything sorts or hashes them. `set()` on a
+    # list containing a list raises TypeError, and `sorted()` on mixed types
+    # raises TypeError -- neither of which is a TclkError, so both escaped
+    # every caller's `except TclkError` and took the process down. One signed
+    # frame with `"rails":[["paper"]]` in a world-writable room was enough.
+    for rail in rails:
+        if not isinstance(rail, str) or not rail:
+            raise TclkError("every rail must be a non-empty string, got %r"
+                            % (rail,))
     if sorted(set(rails)) != list(rails):
         raise TclkError("rails must be de-duplicated and lexically ordered "
                         "before the id is computed")
