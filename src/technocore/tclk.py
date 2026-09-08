@@ -226,6 +226,18 @@ def decode_frame(text):
     """
     if not is_frame(text):
         raise TclkError("not a tclk/1 frame")
+    # The same cap the encoder applies. SPEC.md 1: "Frames are room messages:
+    # one frame per message, single line, <= 4096 chars, ASCII-only." Only
+    # `encode_frame` enforced it, so this side accepted lines no conforming
+    # venue could ever have carried as one message -- and a decoder that
+    # admits frames the encoder refuses is the same defect as an id that
+    # disagrees by one byte: two implementations fold the same transcript into
+    # different states, each certain it is right. Upstream closed the identical
+    # gap in tclk on 2026-09-03 ("decode enforces the room-message cap the
+    # encoder already does").
+    if len(text) > MAX_FRAME_CHARS:
+        raise TclkError("frame is %d chars; the venue caps a message at %d"
+                        % (len(text), MAX_FRAME_CHARS))
     try:
         frame = json.loads(text[len(TCLK_PREFIX):])
     except ValueError as exc:

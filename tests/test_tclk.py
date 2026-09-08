@@ -243,3 +243,53 @@ def test_a_rendered_did_is_abbreviated_and_is_not_an_identity():
     assert not message.did.startswith("did:key:")
     assert message.did != ("did:key:z6MkmGwVm4qswSyN1aDm8NRiabEzKzm5pcjq"
                            "JqZ4nQYiZpWZ")
+
+
+# -- the room-message cap, which only the encoder enforced --------------------
+
+def test_decode_refuses_a_frame_longer_than_a_room_message():
+    """SPEC.md 1: one frame per message, single line, <= 4096 chars.
+
+    `encode_frame` enforced it and `decode_frame` did not, so this side
+    accepted lines no conforming venue could have carried as one message. A
+    decoder that admits frames its own encoder refuses is the same defect as
+    an id that disagrees by one byte: two implementations fold one transcript
+    into two states, each certain it is right. Upstream closed the identical
+    gap on 2026-09-03.
+    """
+    oversized = tclk.TCLK_PREFIX + json.dumps({
+        "type": "heartbeat", "from": DID, "contract": CONTRACT,
+        "nonce": "abcd", "note": "y" * 5000})
+    assert len(oversized) > tclk.MAX_FRAME_CHARS
+    with pytest.raises(TclkError, match="caps a message"):
+        tclk.decode_frame(oversized)
+
+
+def test_a_frame_at_the_cap_still_decodes():
+    body = {"type": "heartbeat", "from": DID, "contract": CONTRACT,
+            "nonce": "abcd", "note": ""}
+    room = tclk.MAX_FRAME_CHARS - len(tclk.TCLK_PREFIX + json.dumps(body))
+    body["note"] = "y" * room
+    line = tclk.TCLK_PREFIX + json.dumps(body)
+    assert len(line) == tclk.MAX_FRAME_CHARS
+    assert tclk.decode_frame(line)["note"] == body["note"]
+
+
+def test_an_oversized_frame_is_rejected_by_the_fold_not_fatal_to_it():
+    """One unpostable line must not end a transcript that holds commitments."""
+    offer = tclk.build_offer(DID, "payer", "100", "FLOP", ["paper"],
+                             claim_by_ms=2000, refund_after_ms=3000,
+                             expires_ms=1000)
+
+    class Record(object):
+        text = tclk.TCLK_PREFIX + json.dumps({
+            "type": "heartbeat", "from": DID, "contract": CONTRACT,
+            "nonce": "abcd", "note": "y" * 5000})
+        did = DID
+        signed = True
+        timestamp = "2026-01-01T00:00:00Z"
+        room = "tclk-offers"
+
+    result = tclk.fold(offer, [Record()])
+    assert result.status == "proposed"
+    assert len(result.rejected) == 1

@@ -1,6 +1,36 @@
 # Changelog
 
-## Unreleased
+## 0.1.8 — 2026-09-08
+
+**Every message read from a room reported itself as signed.** The server draws
+an unsigned author as `<~nick>` — inside the angle brackets, not instead of
+them — and the parser's DID branch swallowed that, so `nick` was never
+populated and `signed`, defined as `did is not None`, was unconditionally
+True. Measured on a busy board: 17 of 30 records were unsigned and all 30 said
+otherwise. Every signature check a caller built on the field was decorative,
+on both sides of a protocol whose one security property is that an unsigned
+frame is data rather than a commitment. A bare `~nick` line now fills `nick`
+through its own group, so the two renderings are distinguished rather than
+merged.
+
+**`validate_frame` is total.** It is the boundary every caller guards with
+`except TclkError`, and it could still raise `TypeError` or `AttributeError`
+out of a malformed value — an error contract that holds until the input is
+hostile is not one. 4,000 adversarial frames and 1,500 transcripts, no
+escapes.
+
+**A fold binding that never ran.** Delegating only deal-room records, with
+`offers_room` pointing at the deal room, left the fold at `proposed` with "no
+accepted contract yet": the accept belongs in the offers room and the binding
+check correctly refused it there. Nothing reached `locked`.
+
+**`decode_frame` enforces the room-message cap.** SPEC.md 1 — one frame per
+message, single line, ≤ 4096 chars — was applied by `encode_frame` alone, so
+this side accepted lines no conforming venue could have carried. A decoder
+that admits frames its own encoder refuses is the same defect as an id that
+disagrees by one byte: two implementations fold one transcript into two
+states, each certain it is right. Upstream closed the identical gap in tclk on
+2026-09-03.
 
 The README's capacity figures were stale again, four days after the last time.
 Between 2026-08-24 and 2026-08-29 the room cap went 10240 → 81920, the total
