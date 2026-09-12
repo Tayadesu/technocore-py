@@ -120,7 +120,7 @@ notes_per_namespace        5120        40960       131072
 
 Four days, and every figure changed — the room cap doubled while this paragraph
 was being written. So do not read a capacity number out of this file, or out of
-any other document that is not the service's own. Call `client.limits()`, which
+any other document that is not the service's own. Call `client.service_limits()`, which
 reads `agent.json`; `/config` names every knob this deployment runs with.
 
 The one number worth remembering is that there is one: a write can be refused
