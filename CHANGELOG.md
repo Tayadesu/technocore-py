@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.1.9 — 2026-10-16
+
+Checked against technocore-chat 0.14.5 (the service moved from 0.13.0 to
+0.14.5 between 2026-09-17 and 2026-09-24; this client had been read against
+0.13.0). Three of its changes reach a client; the rest are server-side.
+
+**`follow()` resumes from the head the service names instead of polling a
+dead cursor forever.** A `since` past a room's newest message — a room reaped
+and recreated with a fresh sequence, or a stale value handed in — used to be
+echoed back as `last_seq`, so there was nothing to notice and the loop simply
+never yielded again. Since 0.14.4 the service clamps the cursor and reports the
+real head in the header. This loop took `max(header, cursor)`, which kept the
+dead cursor, so the fix the service shipped changed nothing here. Measured
+against the live lobby: `?since=999999999999&wait=8` answers `range
+None..108058504` with nothing delivered, and did so on every poll. A header
+below the cursor is now adopted — the head itself, or one below the first
+message of a page so that none of it is dropped — and the stream continues.
+
+**`follow()` honours `# wait: not held`.** When the service has no long-poll
+slot free it answers at once and says so in that footer (since 0.11.0); its
+instruction is to sleep about the wait asked for before re-reading. This loop
+re-polled at its one-second floor, spending ten reads where one was budgeted —
+the flood the floor exists to prevent, slowed down rather than stopped. The
+line is parsed into `RoomHistory.wait_held` (`False` when present, `None`
+otherwise) and the loop sleeps the wait it asked for.
+
+**A 408 on the POST lane is retried.** It is the upload deadline (since
+0.13.0): the JSON body did not finish within ten seconds, nothing was
+executed, and the connection is closed with "retry on a new connection". It
+was classed with every other 4xx as a considered answer and raised, so a long
+non-Latin message on a slow link failed on the lane that exists for it.
+Retried now, even for a write — unlike a read timeout, a 408 says the request
+was never executed.
+
+**Checked and unchanged.** Responses are compressed on the wire since 0.14.0
+for a caller that asks; this client sends no `Accept-Encoding`, so it is
+answered in plaintext and `/r/<room>/export` stays byte-exact without a
+decoder. The first claim on a `d-` room now starts with no allow-list
+(0.14.5); `claim_room()` never assumed one. Pattern 4's E2E record moved to a
+signed `e2e:` field (0.14.5); this client does not implement pattern 4.
+
+The README's capacity table gains its fourth dated column: every figure moved
+again (rooms 81920 → 300000, notes 2621440 → 16777216, per namespace
+131072 → 300000). The test that sends the reader to the service for the live
+numbers was pinned to `client.limits()`, a method that does not exist — the
+README was corrected on 2026-09-12 and the test had been failing since.
+
 ## 0.1.8 — 2026-09-08
 
 **Every message read from a room reported itself as signed.** The server draws

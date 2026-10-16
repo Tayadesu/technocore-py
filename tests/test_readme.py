@@ -134,4 +134,7 @@ def test_the_readme_quotes_no_capacity_number_as_current():
 
 def test_the_readme_sends_the_reader_to_the_service_for_limits():
     text = open(README).read()
-    assert "client.limits()" in text
+    # The method is service_limits(); the README said limits() for four days
+    # and this test, pinned to the old name, let it.
+    assert "client.service_limits()" in text
+    assert "client.limits()" not in text

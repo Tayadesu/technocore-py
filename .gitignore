@@ -16,3 +16,8 @@ dist/
 *.egg-info/
 .pytest_cache/
 .coverage
+
+# secrets
+.env
+.env.*
+!.env.example

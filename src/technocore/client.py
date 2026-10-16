@@ -69,6 +69,9 @@ _SIG_PATH = re.compile(r"^[A-Za-z0-9_-]{86}$")
 # a refused write still spends a room-creation token, so three typos can lock
 # an IP out of creating rooms for eight hours without a room existing.
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
+# "# wait: not held (<which cap>)" -- since 0.11.0, beside the budget footer,
+# when the long poll was refused a waiter slot and the empty reply is immediate.
+_WAIT_NOT_HELD = re.compile(r"^#\s*wait:\s*not held\b")
 _HEADER = re.compile(r"^#\s*room\s+(?P<room>\S+)\s+messages\s+(?P<count>\d{1,19})\s+"
                      r"range\s+(?P<lo>\d{1,19}|None)\.\.(?P<hi>\d{1,19}|None)\s*$")
 
@@ -104,12 +107,18 @@ class Message:
 class RoomHistory(list):
     """A list of :class:`Message` plus the room header the server returned."""
 
-    def __init__(self, messages, room=None, low=None, high=None, raw=""):
+    def __init__(self, messages, room=None, low=None, high=None, raw="",
+                 wait_held=None):
         super().__init__(messages)
         self.room = room
         self.low = low
         self.high = high
         self.raw = raw
+        #: ``False`` when the reply says ``# wait: not held`` -- the service
+        #: had no long-poll slot free and answered at once, so the empty page
+        #: is not "nothing happened in ten seconds", it is "nothing was
+        #: waited for". ``None`` otherwise: held, or not a long-poll at all.
+        self.wait_held = wait_held
 
     @property
     def latest_seq(self):
@@ -466,6 +475,20 @@ class Client:
             # header made this whole check vanish silently while messages kept
             # streaming. The rendered sequences are already in hand.
             seqs = [m.seq for m in history if m.seq is not None]
+            # A cursor past the room's newest message -- a room reaped and
+            # recreated with a fresh sequence, or a stale value handed in --
+            # is clamped by the service to that message (0.14.4), and the
+            # header reports the real head instead of echoing the dead cursor
+            # as it did before. Echoed, the dead cursor was invisible; the
+            # `max` below then kept it forever and this loop polled for
+            # nothing until the caller gave up. Reported, it is a correction
+            # to adopt: resume from the head the service named, or from just
+            # below the first message it delivered so none of that page is
+            # dropped by the filter underneath.
+            if (history.latest_seq is not None and cursor is not None
+                    and history.latest_seq < cursor
+                    and not any(s > cursor for s in seqs)):
+                cursor = (min(seqs) - 1) if seqs else history.latest_seq
             first = min(seqs) if seqs else history.low
             if first is not None and cursor is not None:
                 missed = first - cursor - 1
@@ -506,8 +529,17 @@ class Client:
             # service, out of a per-IP budget the caller did not mean to spend.
             if not yielded:
                 elapsed = time.time() - started
-                if elapsed < min_interval:
-                    time.sleep(min_interval - elapsed)
+                floor = min_interval
+                # "# wait: not held": the service had no long-poll slot and
+                # answered at once. Its own instruction is to sleep about the
+                # wait asked for before re-reading, because re-polling an
+                # unheld wait at the floor above spends ten reads where one
+                # was budgeted -- the exact flood the floor exists to stop,
+                # just slower. Without the line the wait really was held.
+                if history.wait_held is False and wait is not None:
+                    floor = max(floor, float(wait))
+                if elapsed < floor:
+                    time.sleep(floor - elapsed)
 
     def rooms(self):
         """Raw text of the public room directory."""
@@ -1104,6 +1136,7 @@ def parse_room(body):
     never be able to break a client by being malformed.
     """
     room = low = high = None
+    wait_held = None
     messages = []
     # split("\n"), never splitlines(): splitlines() also breaks on \r, \v, \f,
     # \x1c-\x1e, \x85,   and  , so one message body containing any of
@@ -1120,6 +1153,13 @@ def parse_room(body):
                 low = _opt_int(header.group("lo"))
                 high = _opt_int(header.group("hi"))
                 continue
+        # A server footer, not content: every rendered message starts with
+        # its `[seq]`, so a line that starts with `#` was written by the
+        # service. Read only after the header, so a body that is not a room
+        # rendering at all cannot set it.
+        if room is not None and _WAIT_NOT_HELD.match(line):
+            wait_held = False
+            continue
         match = _LINE.match(line)
         if not match:
             continue
@@ -1140,7 +1180,8 @@ def parse_room(body):
                 text=neutralise(match.group("text"))[0],
             )
         )
-    return RoomHistory(messages, room=room, low=low, high=high, raw=body)
+    return RoomHistory(messages, room=room, low=low, high=high, raw=body,
+                       wait_held=wait_held)
 
 
 #: The service prefixes reads with this, followed by a blank line. Anchored at

@@ -57,11 +57,16 @@ def is_retryable(status):
     """Whether a status is worth another attempt.
 
     5xx and 429 are transient: technocore.chat returns 503 under load, which it
-    does regularly. Every other 4xx is a considered answer -- retrying it cannot
-    change the outcome and burns the per-IP write budget, which is the scarce
-    resource here.
+    does regularly. 408 is the POST lane's upload deadline (since 0.13.0): the
+    JSON body did not arrive in full within ten seconds, so nothing was
+    executed, the server closed the connection, and its own instruction is
+    "retry on a new connection" -- which every request here opens anyway.
+    That makes it safe to retry even for a write, unlike a read timeout, where
+    the request may have been executed. Every other 4xx is a considered
+    answer -- retrying it cannot change the outcome and burns the per-IP write
+    budget, which is the scarce resource here.
     """
-    return status >= 500 or status == 429
+    return status >= 500 or status in (408, 429)
 
 
 def _connect_v4(host, port, timeout):

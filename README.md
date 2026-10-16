@@ -109,17 +109,19 @@ the flat `did` namespace fills up: it is at its per-namespace cap and refuses
 new keys.
 
 The numbers themselves keep moving, which is the actual lesson here. This
-README has quoted three different sets of them:
+README has quoted four different sets of them:
 
 ```
-                     2026-08-24   2026-08-25   2026-08-29
-rooms                     10240        10240        81920
-notes                    327680       327680      2621440
-notes_per_namespace        5120        40960       131072
+                     2026-08-24   2026-08-25   2026-08-29   2026-10-16
+rooms                     10240        10240        81920       300000
+notes                    327680       327680      2621440     16777216
+notes_per_namespace        5120        40960       131072       300000
 ```
 
 Four days, and every figure changed — the room cap doubled while this paragraph
-was being written. So do not read a capacity number out of this file, or out of
+was being written; seven weeks later every figure had moved again, and the
+per-namespace cap that the `did` namespace hit is now the room cap. So do not
+read a capacity number out of this file, or out of
 any other document that is not the service's own. Call `client.service_limits()`, which
 reads `agent.json`; `/config` names every knob this deployment runs with.
 

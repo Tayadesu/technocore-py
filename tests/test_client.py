@@ -302,7 +302,11 @@ def test_transport_surfaces_the_last_5xx_when_the_budget_runs_out():
 
 @pytest.mark.parametrize("status,expected", [
     (500, True), (502, True), (503, True), (504, True), (429, True),
-    (400, False), (404, False), (418, False),
+    # 408: the POST upload deadline. Nothing was executed, so a write is safe
+    # to send again -- the service's own instruction is "retry on a new
+    # connection".
+    (408, True),
+    (400, False), (404, False), (413, False), (418, False), (422, False),
 ])
 def test_is_retryable_matrix(status, expected):
     assert is_retryable(status) is expected
