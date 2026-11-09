@@ -293,3 +293,45 @@ def test_an_oversized_frame_is_rejected_by_the_fold_not_fatal_to_it():
     result = tclk.fold(offer, [Record()])
     assert result.status == "proposed"
     assert len(result.rejected) == 1
+
+
+# -- settlement-rail registry (tclk fb910d3, 2026-10-22) ----------------------
+
+def test_rail_ids_are_canonicalised_like_the_reference():
+    assert tclk.normalize_rail_id(" PaperRail ") == "paper"
+    assert tclk.normalize_rail_id("paper-rail") == "paper"
+    assert tclk.normalize_rail_id("FLOP-HTLC") == "flop-htlc"
+    assert tclk.normalize_rail_ids(["x402", "paperrail", "paper", "x402"]) == ["paper", "x402"]
+    assert tuple(sorted(tclk.CANONICAL_RAIL_IDS)) == tclk.CANONICAL_RAIL_IDS
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "lightning", "paper_rail", "-paper", "paper-", "flop htlc", 7, None])
+def test_unknown_or_malformed_rail_ids_raise(bad):
+    with pytest.raises(TclkError):
+        tclk.normalize_rail_id(bad)
+    with pytest.raises(TclkError):
+        tclk.normalize_rail_ids([])
+
+
+def test_rail_matching_is_order_independent():
+    assert tclk.matching_rails(["x402", "flop-htlc"], ["PaperRail", "FLOP-HTLC"]) == ["flop-htlc"]
+    assert tclk.rail_sets_match(["paper"], ["x402", "paper-rail"])
+    assert not tclk.rail_sets_match(["btc-htlc"], ["paper"])
+    with pytest.raises(TclkError):
+        tclk.rail_sets_match(["paper"], ["unknown-rail"])
+
+
+def test_new_frames_carry_canonical_rails_and_old_frames_are_left_alone():
+    offer = tclk.build_offer(DID, "payer", "100", "FLOP", ["PaperRail", "x402"],
+                             claim_by_ms=2000, refund_after_ms=3000, expires_ms=1000)
+    assert offer["rails"] == ["paper", "x402"]
+    lock = tclk.build_lock(DID, "0x" + "11" * 32, "FLOP-HTLC", "escrow-1")
+    assert lock["rail"] == "flop-htlc"
+    with pytest.raises(TclkError):
+        tclk.build_offer(DID, "payer", "100", "FLOP", ["lightning"],
+                         claim_by_ms=2000, refund_after_ms=3000, expires_ms=1000)
+    with pytest.raises(TclkError):
+        tclk.capability_token(["Paper", "nope"])
+    assert tclk.capability_token(["Paper", "x402"]) == "tclk1:paper,x402"
+    # The live vector keeps its historical spelling and id untouched.
+    assert tclk.offer_id(LIVE_OFFER) == LIVE_OFFER["id"]

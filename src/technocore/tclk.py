@@ -31,6 +31,8 @@ __all__ = [
     "build_offer", "build_accept", "build_lock", "build_reveal",
     "build_refund", "build_cancel", "build_receipt", "build_heartbeat",
     "FRAME_FIELDS", "TclkError", "fold", "Fold",
+    "CANONICAL_RAIL_IDS", "RAIL_ID_ALIASES", "normalize_rail_id",
+    "normalize_rail_ids", "matching_rails", "rail_sets_match",
 ]
 
 TCLK_DOMAIN = "FLOP::tclk::v1"
@@ -172,6 +174,58 @@ def state_path(contract):
     return "tclk-" + identifier[2:4], identifier[4:18]
 
 
+# -- settlement rails ---------------------------------------------------------
+#
+# Rail names are protocol identifiers, not labels. tclk fixed the namespace on
+# 2026-10-22 (fb910d3, `src/rails.ts` + the generated field table): seven
+# canonical ids, two aliases, lower-case `a-z0-9` words joined by `-`. New
+# frames are normalised before they are built or hashed; historical frames are
+# never rewritten -- their ids commit to whatever spelling they used, so
+# `fold` and `decode_frame` take rail strings as they are.
+
+CANONICAL_RAIL_IDS = ("btc-htlc", "evm-htlc", "flop-htlc", "memory",
+                      "near-htlc", "paper", "x402")
+RAIL_ID_ALIASES = {"paperrail": "paper", "paper-rail": "paper"}
+_RAIL_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def normalize_rail_id(value):
+    """The canonical id for ``value``; `TclkError` on an unknown rail.
+
+    Trims and lower-cases, resolves the aliases, and refuses anything outside
+    the registry -- an unknown rail in a new offer is a typo that would make
+    the offer unmatchable, and the reference implementation throws too.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise TclkError("rail id must be a non-empty string")
+    spelling = value.strip().lower()
+    if not _RAIL_ID.match(spelling):
+        raise TclkError("malformed rail id: %r" % value)
+    canonical = RAIL_ID_ALIASES.get(spelling, spelling)
+    if canonical not in CANONICAL_RAIL_IDS:
+        raise TclkError("unknown rail id: %r" % value)
+    return canonical
+
+
+def normalize_rail_ids(values):
+    """Canonical ids, duplicates removed, in stable lexical order."""
+    values = list(values or [])
+    if not values:
+        raise TclkError("rails must be a non-empty list")
+    return sorted({normalize_rail_id(v) for v in values})
+
+
+def matching_rails(offered, supported):
+    """Rails both sides accept, order-independent; unknown ids raise."""
+    support = set(normalize_rail_ids(supported))
+    return [r for r in normalize_rail_ids(offered) if r in support]
+
+
+def rail_sets_match(left, right):
+    """True when the two rail sets share at least one canonical rail."""
+    return bool(matching_rails(left, right))
+
+
 def capability_token(rails):
     """The ``tclk1:<rail>,<rail>`` token for the DID note.
 
@@ -179,13 +233,10 @@ def capability_token(rails):
     The note is world-writable, so this is a routing hint and never proof --
     getting it wrong costs a wasted message, never funds.
     """
-    rails = [r for r in rails if r]
+    rails = [r for r in (rails or []) if r]
     if not rails:
         raise TclkError("advertise at least one rail, or omit the token")
-    for rail in rails:
-        if not re.match(r"^[a-z0-9][a-z0-9_-]{0,47}$", rail):
-            raise TclkError("rail id %r is not a venue-shaped name" % rail)
-    return "tclk1:" + ",".join(rails)
+    return "tclk1:" + ",".join(normalize_rail_ids(rails))
 
 
 def parse_capability(note):
@@ -397,8 +448,9 @@ def build_offer(did, role, amount, asset, rails, claim_by_ms,
         "type": "offer", "from": did, "role": role,
         "amount": str(amount), "asset": asset, "lock": lock,
         # Order is not meaningful, but it is part of the id, so normalise
-        # before hashing rather than after.
-        "rails": sorted(set(rails)),
+        # before hashing rather than after -- canonical ids, deduplicated,
+        # sorted (tclk `normalizeRailIds`).
+        "rails": normalize_rail_ids(rails),
         "claimByMs": int(claim_by_ms),
         "refundAfterMs": int(refund_after_ms),
         "expiresMs": int(expires_ms),
@@ -435,7 +487,7 @@ def build_lock(did, contract, rail, ref, presig=None):
     and expires when the offer said -- and walk away if any of it is off.
     """
     frame = {"type": "lock", "from": did, "contract": contract,
-             "rail": rail, "ref": ref}
+             "rail": normalize_rail_id(rail), "ref": ref}
     if presig:
         frame["presig"] = presig
     return validate_frame(frame)
@@ -472,7 +524,7 @@ def build_receipt(did, contract, outcome, rail=None, ref=None):
     frame = {"type": "receipt", "from": did, "contract": contract,
              "outcome": outcome}
     if rail:
-        frame["rail"] = rail
+        frame["rail"] = normalize_rail_id(rail)
     if ref:
         frame["ref"] = ref
     return validate_frame(frame)

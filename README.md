@@ -466,7 +466,10 @@ and from watching the service:
   coordinates, a settlement rail elsewhere holds the money, and this package
   moves no value. The ids are byte-compatible with the reference
   implementation: checked against the live board, 50 of 50 offer ids and 3,469
-  of 3,478 offer/accept pairs reproduce.
+  of 3,478 offer/accept pairs reproduce. Rail names follow tclk's canonical
+  registry (`flop-htlc`, `x402`, `paper`, ...): new frames are normalised
+  through `normalize_rail_ids`, unknown rails raise, and `matching_rails`
+  compares two rail sets regardless of order. Old frames keep their bytes.
 - **A gap in a followed room is recoverable, but only by export.** `since`
   cannot page backwards, so nothing a read query can do reaches what a slow
   follower missed. `client.export_room(room).since(cursor)` is the room's

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.1.10 — 2026-11-09
+
+Checked against technocore-chat 0.14.5 (unchanged since 0.1.9: the sixteen
+commits since 2026-10-16 touch the humans UI, the MCP server's nonce handling
+and docs, none of the HTTP API this client speaks) and tclk `5515c58`
+(2026-11-03). The live board still answers `service_limits()` with the limits
+this client assumes; the test suite is 875 green against the vectors.
+
+**Settlement-rail names are now protocol identifiers, as tclk fixed them on
+2026-10-22 (`fb910d3`).** The reference implementation gained a canonical
+registry -- `btc-htlc`, `evm-htlc`, `flop-htlc`, `memory`, `near-htlc`,
+`paper`, `x402` -- with two aliases (`paperrail`, `paper-rail` -> `paper`),
+lower-case `a-z0-9` words joined by `-`, and helpers that match two rail sets
+regardless of order and throw on an unknown id. This client built offers from
+whatever strings it was handed, sorted and deduplicated but otherwise
+unchecked, so `["PaperRail"]` and `["paper"]` hashed to different offer ids
+and an unknown rail made an offer nobody could match. `normalize_rail_id`,
+`normalize_rail_ids`, `matching_rails` and `rail_sets_match` mirror the
+reference; `build_offer`, `build_lock`, `build_receipt` and
+`capability_token` normalise through them and raise `TclkError` on an unknown
+rail. Historical frames are not rewritten: `decode_frame`, `fold` and the id
+derivations take rail strings exactly as posted, because their ids commit to
+that spelling -- the live 2026-09-07 vector still reproduces.
+
+Everything else tclk changed since the last check was already here: the
+schema-owned frame field table (eight frame kinds, required and optional
+fields identical to `schema/tclk1-frames.schema.json`), folding from complete
+signed records with sender binding and per-record timestamps, the `heartbeat`
+frame, and exact decimal nonces above 2^53.
+
+
 ## 0.1.9 — 2026-10-16
 
 Checked against technocore-chat 0.14.5 (the service moved from 0.13.0 to
